@@ -225,7 +225,7 @@ export interface TokenChartsFilters {
   timeGranularity: TimeGranularity
   selectedRange: number
   topTokenLimit: number
-  username?: string
+  usernames?: string[]
 }
 
 // ============================================================================

@@ -89,15 +89,32 @@ export async function getFlowQuotaDates(
 // Token (Key) Quota Data
 // ----------------------------------------------------------------------------
 
-// Admin: get token-level quota data, optionally filtered by username
+// Admin: get token-level quota data, optionally filtered by usernames
 export async function getTokenQuotaData(params: {
   start_timestamp: number
   end_timestamp: number
-  username?: string
+  usernames?: string[]
 }) {
   const res = await api.get<{ success: boolean; data: TokenQuotaDataItem[] }>(
     '/api/data/tokens',
-    { params }
+    {
+      params: {
+        start_timestamp: params.start_timestamp,
+        end_timestamp: params.end_timestamp,
+        ...(params.usernames &&
+          params.usernames.length > 0 && {
+            username: params.usernames.join(','),
+          }),
+      },
+    }
+  )
+  return res.data
+}
+
+// Admin: get distinct usernames that have token-level quota data
+export async function getTokenQuotaUsernames() {
+  const res = await api.get<{ success: boolean; data: string[] }>(
+    '/api/data/tokens/usernames'
   )
   return res.data
 }

@@ -3,6 +3,7 @@ package controller
 import (
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/QuantumNous/new-api/common"
 	"github.com/QuantumNous/new-api/model"
@@ -130,13 +131,30 @@ func GetUserFlowQuotaDates(c *gin.Context) {
 	return
 }
 
+// parseUsernameFilter splits a comma-separated username query param into a
+// trimmed, non-empty slice. Returns nil when no usernames are present.
+func parseUsernameFilter(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	usernames := make([]string, 0, len(parts))
+	for _, part := range parts {
+		name := strings.TrimSpace(part)
+		if name != "" {
+			usernames = append(usernames, name)
+		}
+	}
+	return usernames
+}
+
 // GetQuotaDatesByToken returns token-level quota data for admins.
-// Accepts optional "username" query param to filter by a specific user.
+// Accepts an optional comma-separated "username" query param to filter by users.
 func GetQuotaDatesByToken(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
-	username := c.Query("username")
-	dates, err := model.GetQuotaDataGroupByToken(startTimestamp, endTimestamp, username)
+	usernames := parseUsernameFilter(c.Query("username"))
+	dates, err := model.GetQuotaDataGroupByToken(startTimestamp, endTimestamp, usernames)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -145,6 +163,21 @@ func GetQuotaDatesByToken(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    dates,
+	})
+}
+
+// GetQuotaTokenUsernames returns the distinct usernames that have token-level
+// quota data. Admin only; used to populate the username filter options.
+func GetQuotaTokenUsernames(c *gin.Context) {
+	usernames, err := model.GetDistinctQuotaTokenUsernames()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    usernames,
 	})
 }
 

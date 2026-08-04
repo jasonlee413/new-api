@@ -199,16 +199,16 @@ type TokenQuotaData struct {
 }
 
 // GetQuotaDataGroupByToken aggregates quota data grouped by token_id and created_at.
-// If username is non-empty, it further filters by that username.
+// If usernames is non-empty, it further filters by those usernames.
 // Admin only: no user_id restriction.
-func GetQuotaDataGroupByToken(startTime int64, endTime int64, username string) ([]*TokenQuotaData, error) {
+func GetQuotaDataGroupByToken(startTime int64, endTime int64, usernames []string) ([]*TokenQuotaData, error) {
 	var rows []*TokenQuotaData
 	query := DB.Table("quota_data").
 		Select("token_id, user_id, username, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
 		Where("created_at >= ? and created_at <= ?", startTime, endTime).
 		Where("token_id > 0") // exclude records without a token
-	if username != "" {
-		query = query.Where("username = ?", username)
+	if len(usernames) > 0 {
+		query = query.Where("username IN ?", usernames)
 	}
 	err := query.
 		Group("token_id, user_id, username, created_at").
@@ -218,6 +218,19 @@ func GetQuotaDataGroupByToken(startTime int64, endTime int64, username string) (
 		return nil, err
 	}
 	return rows, fillTokenNames(rows)
+}
+
+// GetDistinctQuotaTokenUsernames returns the distinct usernames that have
+// token-level quota data, used to populate the admin username filter options.
+func GetDistinctQuotaTokenUsernames() ([]string, error) {
+	var usernames []string
+	err := DB.Table("quota_data").
+		Where("token_id > 0").
+		Where("username != ''").
+		Distinct().
+		Order("username").
+		Pluck("username", &usernames).Error
+	return usernames, err
 }
 
 // GetQuotaDataByUserToken aggregates quota data grouped by token_id and created_at,

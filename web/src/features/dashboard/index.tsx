@@ -233,7 +233,7 @@ export function Dashboard() {
         timeGranularity: granularity,
         selectedRange: getDefaultDays(granularity),
         topTokenLimit: 10,
-        username: '',
+        usernames: [],
       }
     })
   const [flowSensitiveVisible, setFlowSensitiveVisible] = useState(true)

@@ -18,17 +18,18 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { VChart } from '@visactor/react-vchart'
-import { KeyRound, Loader2, Search } from 'lucide-react'
+import { KeyRound, Loader2 } from 'lucide-react'
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
+import { MultiSelect } from '@/components/multi-select'
 import { IconBadge } from '@/components/ui/icon-badge'
-import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { useTheme } from '@/context/theme-provider'
 import {
   getTokenQuotaData,
+  getTokenQuotaUsernames,
   getUserTokenQuotaData,
 } from '@/features/dashboard/api'
 import {
@@ -91,10 +92,11 @@ export function TokenCharts(props: TokenChartsProps) {
   const timeGranularity = props.filters.timeGranularity
   const selectedRange = props.filters.selectedRange
   const topTokenLimit = props.filters.topTokenLimit
-  const usernameFilter = props.filters.username ?? ''
+  const usernamesFilter = useMemo(
+    () => props.filters.usernames ?? [],
+    [props.filters.usernames]
+  )
   const onFiltersChange = props.onFiltersChange
-
-  const [searchInput, setSearchInput] = useState(usernameFilter)
 
   const timeRange = useMemo(() => {
     const { start, end } = getRollingDateRange(selectedRange)
@@ -130,17 +132,11 @@ export function TokenCharts(props: TokenChartsProps) {
     [onFiltersChange, props.filters]
   )
 
-  const handleUsernameSearch = useCallback(() => {
-    onFiltersChange({ ...props.filters, username: searchInput })
-  }, [onFiltersChange, props.filters, searchInput])
-
-  const handleUsernameKeyDown = useCallback(
-    (e: React.KeyboardEvent) => {
-      if (e.key === 'Enter') {
-        handleUsernameSearch()
-      }
+  const handleUsernamesChange = useCallback(
+    (usernames: string[]) => {
+      onFiltersChange({ ...props.filters, usernames })
     },
-    [handleUsernameSearch]
+    [onFiltersChange, props.filters]
   )
 
   useEffect(() => {
@@ -159,13 +155,21 @@ export function TokenCharts(props: TokenChartsProps) {
     updateTheme()
   }, [resolvedTheme])
 
+  const { data: usernameOptions } = useQuery({
+    queryKey: ['dashboard', 'token-quota-usernames'],
+    queryFn: getTokenQuotaUsernames,
+    select: (res) => (res.success ? (res.data ?? []) : []),
+    enabled: isAdmin,
+    staleTime: 300_000,
+  })
+
   const { data: tokenData, isLoading } = useQuery({
-    queryKey: ['dashboard', 'token-quota', timeRange, usernameFilter, isAdmin],
+    queryKey: ['dashboard', 'token-quota', timeRange, usernamesFilter, isAdmin],
     queryFn: () => {
       if (isAdmin) {
         return getTokenQuotaData({
           ...timeRange,
-          username: usernameFilter || undefined,
+          usernames: usernamesFilter.length > 0 ? usernamesFilter : undefined,
         })
       }
       return getUserTokenQuotaData(timeRange)
@@ -248,22 +252,17 @@ export function TokenCharts(props: TokenChartsProps) {
         </Tabs>
 
         {isAdmin && (
-          <div className='flex shrink-0 items-center gap-1'>
-            <Input
-              placeholder={t('Filter by username')}
-              value={searchInput}
-              onChange={(e) => setSearchInput(e.target.value)}
-              onKeyDown={handleUsernameKeyDown}
-              className='h-8 w-36 text-xs'
-            />
-            <button
-              onClick={handleUsernameSearch}
-              className='text-muted-foreground hover:text-foreground rounded-md p-1.5 transition-colors'
-              aria-label={t('Search')}
-            >
-              <Search className='size-4' />
-            </button>
-          </div>
+          <MultiSelect
+            options={(usernameOptions ?? []).map((name) => ({
+              label: name,
+              value: name,
+            }))}
+            selected={usernamesFilter}
+            onChange={handleUsernamesChange}
+            placeholder={t('Filter by username')}
+            className='w-48 shrink-0 text-xs sm:w-56'
+            maxVisibleChips={1}
+          />
         )}
 
         {isLoading && (
