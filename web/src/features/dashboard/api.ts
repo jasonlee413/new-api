@@ -21,6 +21,7 @@ import { api } from '@/lib/api'
 import type {
   FlowQuotaDataItem,
   QuotaDataItem,
+  TokenFilterOption,
   TokenQuotaDataItem,
   UptimeGroupResult,
 } from './types'
@@ -41,6 +42,7 @@ export async function getUserQuotaDates(
     end_timestamp: number
     default_time?: string
     username?: string
+    token_ids?: string
   },
   isAdmin = false
 ) {
@@ -73,6 +75,7 @@ export async function getFlowQuotaDates(
     end_timestamp: number
     default_time?: string
     username?: string
+    token_ids?: string
   },
   isAdmin = false
 ) {
@@ -115,6 +118,24 @@ export async function getTokenQuotaData(params: {
 export async function getTokenQuotaUsernames() {
   const res = await api.get<{ success: boolean; data: string[] }>(
     '/api/data/tokens/usernames'
+  )
+  return res.data
+}
+
+// Admin: get distinct usernames that have quota data (model analytics filter)
+export async function getQuotaUsernames() {
+  const res = await api.get<{ success: boolean; data: string[] }>(
+    '/api/data/usernames'
+  )
+  return res.data
+}
+
+// Get token options for the key filter dropdown. Normal users get their own
+// tokens; admins can search across all tokens by token name or owner username.
+export async function getTokenFilterOptions(keyword?: string) {
+  const res = await api.get<{ success: boolean; data: TokenFilterOption[] }>(
+    '/api/data/tokens/options',
+    { params: keyword ? { keyword } : {} }
   )
   return res.data
 }

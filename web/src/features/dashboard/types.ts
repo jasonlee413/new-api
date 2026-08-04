@@ -199,6 +199,19 @@ export interface DashboardFilters {
   start_timestamp?: Date
   end_timestamp?: Date
   time_granularity?: TimeGranularity
+  // Admin only: filter by a set of usernames; serialized as username=a,b
+  usernames?: string[]
+  // Available to all users: filter by a set of token (key) IDs; serialized as
+  // token_ids=1,2
+  token_ids?: number[]
+}
+
+// Lightweight token record used to populate the key-filter dropdown.
+export interface TokenFilterOption {
+  id: number
+  name: string
+  user_id?: number
+  // Only returned for admins, used to render "username / name" labels.
   username?: string
 }
 

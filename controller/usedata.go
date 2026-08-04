@@ -32,8 +32,9 @@ func parseFlowQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
 func GetAllQuotaDates(c *gin.Context) {
 	startTimestamp, _ := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	endTimestamp, _ := strconv.ParseInt(c.Query("end_timestamp"), 10, 64)
-	username := c.Query("username")
-	dates, err := model.GetAllQuotaDates(startTimestamp, endTimestamp, username)
+	usernames := parseUsernameFilter(c.Query("username"))
+	tokenIds := parseIntSliceFilter(c.Query("token_ids"))
+	dates, err := model.GetAllQuotaDates(startTimestamp, endTimestamp, usernames, tokenIds)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -73,7 +74,8 @@ func GetUserQuotaDates(c *gin.Context) {
 		})
 		return
 	}
-	dates, err := model.GetQuotaDataByUserId(userId, startTimestamp, endTimestamp)
+	tokenIds := parseIntSliceFilter(c.Query("token_ids"))
+	dates, err := model.GetQuotaDataByUserId(userId, startTimestamp, endTimestamp, tokenIds)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -91,8 +93,9 @@ func GetAllFlowQuotaDates(c *gin.Context) {
 	if !ok {
 		return
 	}
-	username := c.Query("username")
-	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, username, 0, c.GetInt("role"))
+	usernames := parseUsernameFilter(c.Query("username"))
+	tokenIds := parseIntSliceFilter(c.Query("token_ids"))
+	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, usernames, tokenIds, 0, c.GetInt("role"))
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -118,7 +121,8 @@ func GetUserFlowQuotaDates(c *gin.Context) {
 		})
 		return
 	}
-	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, "", userId, common.RoleCommonUser)
+	tokenIds := parseIntSliceFilter(c.Query("token_ids"))
+	dates, err := model.GetFlowQuotaData(startTimestamp, endTimestamp, nil, tokenIds, userId, common.RoleCommonUser)
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -146,6 +150,32 @@ func parseUsernameFilter(raw string) []string {
 		}
 	}
 	return usernames
+}
+
+// parseIntSliceFilter splits a comma-separated integer query param into a
+// slice, ignoring invalid or non-positive values. The result is capped at
+// 100 entries to keep IN queries bounded. Returns nil when empty.
+func parseIntSliceFilter(raw string) []int {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]int, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil || value <= 0 {
+			continue
+		}
+		values = append(values, value)
+		if len(values) >= 100 {
+			break
+		}
+	}
+	return values
 }
 
 // GetQuotaDatesByToken returns token-level quota data for admins.
@@ -178,6 +208,40 @@ func GetQuotaTokenUsernames(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    usernames,
+	})
+}
+
+// GetQuotaDataUsernames returns the distinct usernames that have quota data.
+// Admin only; used to populate the model-analytics username filter options.
+func GetQuotaDataUsernames(c *gin.Context) {
+	usernames, err := model.GetDistinctQuotaUsernames()
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    usernames,
+	})
+}
+
+// GetQuotaTokenOptions returns token options for the dashboard key filter.
+// Normal users only see their own tokens; admins can search across all tokens
+// by token name or the owner's username via the "keyword" query param.
+func GetQuotaTokenOptions(c *gin.Context) {
+	userId := c.GetInt("id")
+	isAdmin := c.GetInt("role") >= common.RoleAdminUser
+	keyword := c.Query("keyword")
+	options, err := model.SearchTokenFilterOptions(userId, isAdmin, keyword, 50)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    options,
 	})
 }
 

@@ -16,14 +16,15 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 For commercial licensing, please contact support@quantumnous.com
 */
+import { useQuery } from '@tanstack/react-query'
 import { Filter, RotateCcw, Calendar, Search } from 'lucide-react'
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 
 import { DateTimePicker } from '@/components/datetime-picker'
 import { Dialog } from '@/components/dialog'
+import { MultiSelect } from '@/components/multi-select'
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
@@ -34,6 +35,10 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
+import {
+  getQuotaUsernames,
+  getTokenFilterOptions,
+} from '@/features/dashboard/api'
 import {
   TIME_GRANULARITY_OPTIONS,
   TIME_RANGE_PRESETS,
@@ -46,6 +51,7 @@ import type {
   DashboardChartPreferences,
   DashboardFilters,
 } from '@/features/dashboard/types'
+import { useDebounce } from '@/hooks/use-debounce'
 import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
 import { cn } from '@/lib/utils'
 import { useAuthStore } from '@/stores/auth-store'
@@ -110,6 +116,47 @@ export function ModelsFilter(props: ModelsFilterProps) {
   const [selectedRange, setSelectedRange] = useState<number | null>(() =>
     detectQuickRangeDays(props.currentFilters)
   )
+  const [keySearchInput, setKeySearchInput] = useState('')
+  const debouncedKeySearch = useDebounce(keySearchInput, 300)
+
+  // Username options for the admin user filter; loaded only while the dialog
+  // is open so the dashboard itself never pays for this request.
+  const { data: usernameOptions } = useQuery({
+    queryKey: ['dashboard', 'quota-usernames'],
+    queryFn: getQuotaUsernames,
+    select: (res) => (res.success ? (res.data ?? []) : []),
+    enabled: open && Boolean(isAdmin),
+    staleTime: 300_000,
+  })
+
+  // Token (key) options, searched server-side so admins can find any key
+  // without loading the full token list. Normal users only get their own.
+  const { data: tokenOptions } = useQuery({
+    queryKey: ['dashboard', 'token-filter-options', debouncedKeySearch],
+    queryFn: () => getTokenFilterOptions(debouncedKeySearch || undefined),
+    select: (res) => (res.success ? (res.data ?? []) : []),
+    enabled: open,
+    staleTime: 60_000,
+  })
+
+  const tokenSelectOptions = useMemo(() => {
+    const options = (tokenOptions ?? []).map((token) => ({
+      label:
+        isAdmin && token.username
+          ? `${token.username} / ${token.name || `#${token.id}`}`
+          : token.name || `#${token.id}`,
+      value: String(token.id),
+    }))
+    // Keep labels for already-selected keys that fall outside the current
+    // option page (e.g. after a search that excludes them).
+    for (const id of filters.token_ids ?? []) {
+      const value = String(id)
+      if (!options.some((option) => option.value === value)) {
+        options.push({ label: `#${value}`, value })
+      }
+    }
+    return options
+  }, [tokenOptions, filters.token_ids, isAdmin])
 
   const handleOpenChange = (nextOpen: boolean) => {
     // Sync the editing state from the applied filters every time the dialog
@@ -119,6 +166,7 @@ export function ModelsFilter(props: ModelsFilterProps) {
         props.currentFilters ?? buildDefaultDashboardFilters(props.preferences)
       setFilters(applied)
       setSelectedRange(detectQuickRangeDays(applied))
+      setKeySearchInput('')
     }
     setOpen(nextOpen)
   }
@@ -141,13 +189,14 @@ export function ModelsFilter(props: ModelsFilterProps) {
       end_timestamp: end,
     })
     setSelectedRange(days)
+    setKeySearchInput('')
     props.onReset()
     setOpen(false)
   }
 
   const handleChange = (
     field: keyof DashboardFilters,
-    value: Date | string | undefined
+    value: Date | string | string[] | number[] | undefined
   ) => {
     setFilters((prev) => ({ ...prev, [field]: value }))
     if (field === 'start_timestamp' || field === 'end_timestamp')
@@ -283,18 +332,46 @@ export function ModelsFilter(props: ModelsFilterProps) {
             </Select>
           </div>
 
+          <SectionDivider label={t('Key Filter')} />
+
+          {/* Key filter: available to all users; normal users only see their
+              own keys, admins can search across all keys. */}
+          <div className='grid gap-2'>
+            <Label>{t('Key')}</Label>
+            <MultiSelect
+              options={tokenSelectOptions}
+              selected={(filters.token_ids ?? []).map(String)}
+              onChange={(values) =>
+                handleChange(
+                  'token_ids',
+                  values
+                    .map((value) => Number(value))
+                    .filter((num) => Number.isInteger(num) && num > 0)
+                )
+              }
+              placeholder={t('Filter by key name')}
+              filterByLabel
+              onInputValueChange={setKeySearchInput}
+              maxVisibleChips={2}
+            />
+          </div>
+
           {/* Admin-only fields */}
           {isAdmin && (
             <>
               <SectionDivider label={t('Admin Only')} />
 
               <div className='grid gap-2'>
-                <Label htmlFor='username'>{t('Username')}</Label>
-                <Input
-                  id='username'
+                <Label>{t('Username')}</Label>
+                <MultiSelect
+                  options={(usernameOptions ?? []).map((name) => ({
+                    label: name,
+                    value: name,
+                  }))}
+                  selected={filters.usernames ?? []}
+                  onChange={(values) => handleChange('usernames', values)}
                   placeholder={t('Filter by username')}
-                  value={filters.username}
-                  onChange={(e) => handleChange('username', e.target.value)}
+                  maxVisibleChips={2}
                 />
               </div>
             </>

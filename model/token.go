@@ -469,6 +469,93 @@ func CountUserTokens(userId int) (int64, error) {
 	return total, err
 }
 
+// TokenFilterOption is a lightweight token record used to populate the
+// dashboard key-filter dropdown.
+type TokenFilterOption struct {
+	Id       int    `json:"id"`
+	Name     string `json:"name"`
+	UserId   int    `json:"user_id,omitempty"`
+	Username string `json:"username,omitempty"` // only filled for admins
+}
+
+const tokenFilterOptionHardLimit = 100
+
+// SearchTokenFilterOptions returns token options for the dashboard key filter.
+// Normal users only see their own tokens; admins can search across all tokens
+// by token name or the owner's username. Results are capped by limit.
+func SearchTokenFilterOptions(userId int, isAdmin bool, keyword string, limit int) ([]*TokenFilterOption, error) {
+	if limit <= 0 || limit > tokenFilterOptionHardLimit {
+		limit = 50
+	}
+	options := make([]*TokenFilterOption, 0)
+	query := DB.Model(&Token{}).Select("id, name, user_id")
+	if !isAdmin {
+		query = query.Where("user_id = ?", userId)
+	}
+	if keyword = strings.TrimSpace(keyword); keyword != "" {
+		// Escape LIKE metacharacters so the keyword always matches literally,
+		// then wrap it for substring search.
+		escaped := strings.ReplaceAll(keyword, "!", "!!")
+		escaped = strings.ReplaceAll(escaped, "%", "!%")
+		escaped = strings.ReplaceAll(escaped, "_", "!_")
+		like := "%" + escaped + "%"
+		if isAdmin {
+			query = query.Where(
+				"name LIKE ? ESCAPE '!' OR user_id IN (?)",
+				like,
+				DB.Model(&User{}).Select("id").Where("username LIKE ? ESCAPE '!'", like),
+			)
+		} else {
+			query = query.Where("name LIKE ? ESCAPE '!'", like)
+		}
+	}
+	err := query.Order("id desc").Limit(limit).Find(&options).Error
+	if err != nil {
+		return nil, err
+	}
+	if isAdmin && len(options) > 0 {
+		if err := fillTokenFilterOptionUsernames(options); err != nil {
+			return nil, err
+		}
+	}
+	return options, nil
+}
+
+// fillTokenFilterOptionUsernames batch-loads usernames for the token options
+// so admins can see each token's owner without N+1 queries.
+func fillTokenFilterOptionUsernames(options []*TokenFilterOption) error {
+	userIDSet := make(map[int]struct{})
+	userIDs := make([]int, 0)
+	for _, option := range options {
+		if option.UserId == 0 {
+			continue
+		}
+		if _, ok := userIDSet[option.UserId]; ok {
+			continue
+		}
+		userIDSet[option.UserId] = struct{}{}
+		userIDs = append(userIDs, option.UserId)
+	}
+	if len(userIDs) == 0 {
+		return nil
+	}
+	var users []struct {
+		Id       int    `gorm:"column:id"`
+		Username string `gorm:"column:username"`
+	}
+	if err := DB.Model(&User{}).Select("id, username").Where("id IN ?", userIDs).Find(&users).Error; err != nil {
+		return err
+	}
+	usernameByID := make(map[int]string, len(users))
+	for _, user := range users {
+		usernameByID[user.Id] = user.Username
+	}
+	for _, option := range options {
+		option.Username = usernameByID[option.UserId]
+	}
+	return nil
+}
+
 // BatchDeleteTokens 删除指定用户的一组令牌，返回成功删除数量
 func BatchDeleteTokens(ids []int, userId int) (int, error) {
 	if len(ids) == 0 {

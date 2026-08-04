@@ -77,6 +77,17 @@ interface MultiSelectProps {
    * instead of being inert. The remove (×) button keeps its own behaviour.
    */
   copyChipOnClick?: boolean
+  /**
+   * When true, the search query matches option labels (and raw values) instead
+   * of only the raw values. Useful when `value` is an opaque id (e.g. a token
+   * id) and users search by the displayed name.
+   */
+  filterByLabel?: boolean
+  /**
+   * Called whenever the text input value changes. Useful for server-side
+   * search: the parent can debounce this and reload `options`.
+   */
+  onInputValueChange?: (value: string) => void
 }
 
 const COMMA_REGEX = /[,，\n]/
@@ -184,18 +195,37 @@ export function MultiSelect(props: MultiSelectProps) {
     [props]
   )
 
+  // Custom filter matching the query against display labels (falling back to
+  // the raw value) so options whose value is an opaque id stay searchable by
+  // name. Only used when `filterByLabel` is set.
+  const labelFilter = React.useCallback(
+    (itemValue: string, query: string) => {
+      const trimmedQuery = query.trim().toLowerCase()
+      if (!trimmedQuery) return true
+      const label = labelMap.get(itemValue) ?? itemValue
+      return (
+        label.toLowerCase().includes(trimmedQuery) ||
+        itemValue.toLowerCase().includes(trimmedQuery)
+      )
+    },
+    [labelMap]
+  )
+
   const handleInputValueChange = (value: string) => {
     if (!props.allowCreate) {
       setInputValue(value)
+      props.onInputValueChange?.(value)
       return
     }
     const parsed = splitDraft(value)
     if (parsed.completed.length > 0) {
       addValues(parsed.completed)
       setInputValue(parsed.draft)
+      props.onInputValueChange?.(parsed.draft)
       return
     }
     setInputValue(value)
+    props.onInputValueChange?.(value)
   }
 
   const handleValueChange = (next: string[]) => {
@@ -205,6 +235,7 @@ export function MultiSelect(props: MultiSelectProps) {
     // feel snappier and matches popular chip-style multiselects.
     if (next.length > props.selected.length) {
       setInputValue('')
+      props.onInputValueChange?.('')
     }
   }
 
@@ -256,6 +287,7 @@ export function MultiSelect(props: MultiSelectProps) {
       open={open}
       onOpenChange={setOpen}
       disabled={props.disabled}
+      filter={props.filterByLabel ? labelFilter : undefined}
     >
       <ComboboxChips
         ref={chipsAnchorRef}

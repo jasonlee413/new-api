@@ -65,6 +65,10 @@ export function cleanFilters<T extends Record<string, unknown>>(
   const cleaned: Partial<T> = {}
   for (const [key, value] of Object.entries(filters)) {
     if (value === undefined || value === null) continue
+    if (Array.isArray(value)) {
+      if (value.length > 0) cleaned[key as keyof T] = value as T[keyof T]
+      continue
+    }
     if (typeof value === 'string') {
       const trimmed = value.trim()
       if (trimmed) cleaned[key as keyof T] = trimmed as T[keyof T]
@@ -154,16 +158,28 @@ export function buildDefaultDashboardFilters(
 
 export function buildQueryParams(
   timeRange: { start_timestamp: number; end_timestamp: number },
-  filters?: { time_granularity?: TimeGranularity; username?: string }
+  filters?: {
+    time_granularity?: TimeGranularity
+    usernames?: string[]
+    token_ids?: number[]
+  }
 ): {
   start_timestamp: number
   end_timestamp: number
   default_time: string
   username?: string
+  token_ids?: string
 } {
   return {
     ...timeRange,
     default_time: getSavedGranularity(filters?.time_granularity),
-    ...(filters?.username && { username: filters.username }),
+    ...(filters?.usernames &&
+      filters.usernames.length > 0 && {
+        username: filters.usernames.join(','),
+      }),
+    ...(filters?.token_ids &&
+      filters.token_ids.length > 0 && {
+        token_ids: filters.token_ids.join(','),
+      }),
   }
 }
