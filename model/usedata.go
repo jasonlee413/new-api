@@ -181,3 +181,97 @@ func GetAllQuotaDates(startTime int64, endTime int64, username string) (quotaDat
 	err = DB.Table("quota_data").Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used, created_at").Where("created_at >= ? and created_at <= ?", startTime, endTime).Group("model_name, created_at").Find(&quotaDatas).Error
 	return quotaDatas, err
 }
+
+// ============================================================================
+// Token (Key) quota data queries
+// ============================================================================
+
+// TokenQuotaData is the result shape for per-token quota aggregation.
+type TokenQuotaData struct {
+	TokenID    int    `json:"token_id"`
+	TokenName  string `json:"token_name"`
+	UserID     int    `json:"user_id"`
+	Username   string `json:"username"`
+	CreatedAt  int64  `json:"created_at"`
+	Count      int    `json:"count"`
+	Quota      int    `json:"quota"`
+	TokenUsed  int    `json:"token_used"`
+}
+
+// GetQuotaDataGroupByToken aggregates quota data grouped by token_id and created_at.
+// If username is non-empty, it further filters by that username.
+// Admin only: no user_id restriction.
+func GetQuotaDataGroupByToken(startTime int64, endTime int64, username string) ([]*TokenQuotaData, error) {
+	var rows []*TokenQuotaData
+	query := DB.Table("quota_data").
+		Select("token_id, user_id, username, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
+		Where("created_at >= ? and created_at <= ?", startTime, endTime).
+		Where("token_id > 0") // exclude records without a token
+	if username != "" {
+		query = query.Where("username = ?", username)
+	}
+	err := query.
+		Group("token_id, user_id, username, created_at").
+		Order("quota DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, fillTokenNames(rows)
+}
+
+// GetQuotaDataByUserToken aggregates quota data grouped by token_id and created_at,
+// restricted to the given user_id. Used for normal users viewing their own keys.
+func GetQuotaDataByUserToken(userId int, startTime int64, endTime int64) ([]*TokenQuotaData, error) {
+	var rows []*TokenQuotaData
+	err := DB.Table("quota_data").
+		Select("token_id, user_id, username, created_at, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
+		Where("user_id = ? and created_at >= ? and created_at <= ?", userId, startTime, endTime).
+		Where("token_id > 0").
+		Group("token_id, user_id, username, created_at").
+		Order("quota DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, fillTokenNames(rows)
+}
+
+// fillTokenNames batch-loads token names from the tokens table and assigns them
+// to TokenQuotaData rows. Deleted tokens leave TokenName empty so the frontend
+// can render a localized "deleted" label.
+func fillTokenNames(rows []*TokenQuotaData) error {
+	tokenIDSet := make(map[int]struct{})
+	tokenIDs := make([]int, 0)
+	for _, row := range rows {
+		if row.TokenID == 0 {
+			continue
+		}
+		if _, ok := tokenIDSet[row.TokenID]; ok {
+			continue
+		}
+		tokenIDSet[row.TokenID] = struct{}{}
+		tokenIDs = append(tokenIDs, row.TokenID)
+	}
+	if len(tokenIDs) == 0 {
+		return nil
+	}
+
+	var tokens []struct {
+		Id   int    `gorm:"column:id"`
+		Name string `gorm:"column:name"`
+	}
+	if err := DB.Model(&Token{}).Select("id, name").Where("id IN ?", tokenIDs).Find(&tokens).Error; err != nil {
+		return err
+	}
+	tokenNameByID := make(map[int]string, len(tokens))
+	for _, token := range tokens {
+		tokenNameByID[token.Id] = token.Name
+	}
+	for _, row := range rows {
+		if name := tokenNameByID[row.TokenID]; name != "" {
+			row.TokenName = name
+		}
+	}
+	return nil
+}

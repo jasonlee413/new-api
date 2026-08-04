@@ -55,6 +55,7 @@ import type {
   DashboardChartPreferences,
   DashboardFilters,
   QuotaDataItem,
+  TokenChartsFilters,
   UserChartsFilters,
 } from './types'
 
@@ -110,6 +111,12 @@ const LazyUserCharts = lazy(() =>
 const LazyFlowCharts = lazy(() =>
   import('./components/flow/flow-charts').then((m) => ({
     default: m.FlowCharts,
+  }))
+)
+
+const LazyTokenCharts = lazy(() =>
+  import('./components/tokens/token-charts').then((m) => ({
+    default: m.TokenCharts,
   }))
 )
 
@@ -189,6 +196,9 @@ const SECTION_META: Record<DashboardSectionId, { titleKey: string }> = {
   users: {
     titleKey: 'User Analytics',
   },
+  tokens: {
+    titleKey: 'Key Analytics',
+  },
 }
 
 export function Dashboard() {
@@ -216,6 +226,16 @@ export function Dashboard() {
       }
     }
   )
+  const [tokenChartsFilters, setTokenChartsFilters] =
+    useState<TokenChartsFilters>(() => {
+      const granularity = getSavedGranularity()
+      return {
+        timeGranularity: granularity,
+        selectedRange: getDefaultDays(granularity),
+        topTokenLimit: 10,
+        username: '',
+      }
+    })
   const [flowSensitiveVisible, setFlowSensitiveVisible] = useState(true)
 
   const handleFilterChange = useCallback((filters: DashboardFilters) => {
@@ -406,6 +426,16 @@ export function Dashboard() {
                 <LazyFlowCharts
                   filters={modelFilters}
                   sensitiveVisible={flowSensitiveVisible}
+                />
+              </Suspense>
+            </FadeIn>
+          )}
+          {activeSection === 'tokens' && (
+            <FadeIn>
+              <Suspense fallback={<ModelChartsFallback />}>
+                <LazyTokenCharts
+                  filters={tokenChartsFilters}
+                  onFiltersChange={setTokenChartsFilters}
                 />
               </Suspense>
             </FadeIn>

@@ -1,4 +1,4 @@
-{
+﻿{
   "translation": {
     "360": "360",
     "1000": "1000",
@@ -4714,6 +4714,7 @@
     "Top models by traffic": "Mô hình có lượng truy cập cao nhất",
     "Top P": "Top P",
     "Top up balance and view billing history.": "Nạp tiền vào tài khoản và xem lịch sử thanh toán.",
+    "Top Keys": "Khóa hàng đầu",
     "Top Users": "Người dùng hàng đầu",
     "Top vendors": "Nhà cung cấp hàng đầu",
     "Top-up": "Nạp tiền",
@@ -4973,6 +4974,9 @@
     "User {{id}}": "Người dùng {{id}}",
     "User Agent": "Tác nhân người dùng",
     "User Agreement": "Thỏa thuận người dùng",
+    "Key Analytics": "Thống kê khóa",
+    "Key Consumption Ranking": "Xếp hạng tiêu thụ khóa",
+    "Key Consumption Trend": "Xu hướng tiêu thụ khóa",
     "User Analytics": "Thống kê người dùng",
     "User Consumption Ranking": "Xếp hạng tiêu thụ",
     "User Consumption Trend": "Xu hướng tiêu thụ",

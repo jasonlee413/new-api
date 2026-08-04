@@ -33,6 +33,17 @@ export interface QuotaDataItem {
   quota?: number
 }
 
+export interface TokenQuotaDataItem {
+  token_id: number
+  token_name?: string
+  user_id?: number
+  username?: string
+  created_at: number
+  count?: number
+  quota?: number
+  token_used?: number
+}
+
 export interface FlowQuotaDataItem {
   user_id?: number
   username?: string
@@ -210,6 +221,13 @@ export interface UserChartsFilters {
   topUserLimit: number
 }
 
+export interface TokenChartsFilters {
+  timeGranularity: TimeGranularity
+  selectedRange: number
+  topTokenLimit: number
+  username?: string
+}
+
 // ============================================================================
 // API Info Types
 // ============================================================================
@@ -249,6 +267,11 @@ export interface ProcessedChartData {
 export interface ProcessedUserChartData {
   spec_user_rank: VChartSpec
   spec_user_trend: VChartSpec
+}
+
+export interface ProcessedTokenChartData {
+  spec_token_rank: VChartSpec
+  spec_token_trend: VChartSpec
 }
 
 // ============================================================================
