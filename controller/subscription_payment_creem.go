@@ -50,6 +50,10 @@ func SubscriptionRequestCreemPay(c *gin.Context) {
 		common.ApiErrorMsg(c, "套餐未启用")
 		return
 	}
+	if !plan.IsVisibleToGroup(c.GetString("group")) {
+		common.ApiErrorMsg(c, "当前分组不可购买该套餐")
+		return
+	}
 	if plan.CreemProductId == "" {
 		common.ApiErrorMsg(c, "该套餐未配置 CreemProductId")
 		return

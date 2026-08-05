@@ -41,6 +41,10 @@ func SubscriptionRequestEpay(c *gin.Context) {
 		common.ApiErrorMsg(c, "套餐未启用")
 		return
 	}
+	if !plan.IsVisibleToGroup(c.GetString("group")) {
+		common.ApiErrorMsg(c, "当前分组不可购买该套餐")
+		return
+	}
 	if plan.PriceAmount < 0.01 {
 		common.ApiErrorMsg(c, "套餐金额过低")
 		return

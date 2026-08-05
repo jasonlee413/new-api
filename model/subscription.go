@@ -178,6 +178,9 @@ type SubscriptionPlan struct {
 	// Downgrade user group on expiry (empty = revert to the group held before purchase)
 	DowngradeGroup string `json:"downgrade_group" gorm:"type:varchar(64);default:''"`
 
+	// User groups allowed to see/purchase this plan (comma-separated, empty = all groups)
+	Groups string `json:"groups" gorm:"type:varchar(512);default:''"`
+
 	// Total quota (amount in quota units, 0 = unlimited)
 	TotalAmount int64 `json:"total_amount" gorm:"type:bigint;not null;default:0"`
 
@@ -208,6 +211,22 @@ func (p *SubscriptionPlan) NormalizeDefaults() {
 	if p.AllowWalletOverflow == nil {
 		p.AllowWalletOverflow = common.GetPointer(true)
 	}
+}
+
+// IsVisibleToGroup reports whether the plan is visible and purchasable for the
+// given user group. An empty Groups list means the plan is open to all groups.
+func (p *SubscriptionPlan) IsVisibleToGroup(group string) bool {
+	groups := strings.TrimSpace(p.Groups)
+	if groups == "" {
+		return true
+	}
+	group = strings.TrimSpace(group)
+	for _, g := range strings.Split(groups, ",") {
+		if strings.TrimSpace(g) == group {
+			return true
+		}
+	}
+	return false
 }
 
 // Subscription order (payment -> webhook -> create UserSubscription)
@@ -775,6 +794,9 @@ func PurchaseSubscriptionWithBalance(userId int, planId int) error {
 		var user User
 		if err := lockForUpdate(tx).Where("id = ?", userId).First(&user).Error; err != nil {
 			return err
+		}
+		if !plan.IsVisibleToGroup(user.Group) {
+			return errors.New("当前分组不可购买该套餐")
 		}
 		if requiredQuota > 0 && user.Quota < requiredQuota {
 			return errors.New("余额不足")

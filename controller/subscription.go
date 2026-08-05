@@ -35,6 +35,7 @@ func GetSubscriptionPlans(c *gin.Context) {
 		return
 	}
 
+	userGroup := c.GetString("group")
 	var plans []model.SubscriptionPlan
 	if err := model.DB.Where("enabled = ?", true).Order("sort_order desc, id desc").Find(&plans).Error; err != nil {
 		common.ApiError(c, err)
@@ -42,6 +43,9 @@ func GetSubscriptionPlans(c *gin.Context) {
 	}
 	result := make([]SubscriptionPlanDTO, 0, len(plans))
 	for _, p := range plans {
+		if !p.IsVisibleToGroup(userGroup) {
+			continue
+		}
 		p.NormalizeDefaults()
 		result = append(result, SubscriptionPlanDTO{
 			Plan: p,
@@ -138,6 +142,33 @@ type AdminUpsertSubscriptionPlanRequest struct {
 	Plan model.SubscriptionPlan `json:"plan"`
 }
 
+// normalizeSubscriptionPlanGroups normalizes the comma-separated visible group list
+// and validates each group against the configured group ratios.
+func normalizeSubscriptionPlanGroups(groups string) (string, error) {
+	groups = strings.TrimSpace(groups)
+	if groups == "" {
+		return "", nil
+	}
+	validGroups := ratio_setting.GetGroupRatioCopy()
+	seen := make(map[string]struct{})
+	normalized := make([]string, 0, 4)
+	for _, g := range strings.Split(groups, ",") {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		if _, ok := validGroups[g]; !ok {
+			return "", fmt.Errorf("用户分组 %s 不存在", g)
+		}
+		if _, ok := seen[g]; ok {
+			continue
+		}
+		seen[g] = struct{}{}
+		normalized = append(normalized, g)
+	}
+	return strings.Join(normalized, ","), nil
+}
+
 func AdminCreateSubscriptionPlan(c *gin.Context) {
 	if !requirePaymentCompliance(c) {
 		return
@@ -199,12 +230,18 @@ func AdminCreateSubscriptionPlan(c *gin.Context) {
 			return
 		}
 	}
+	normalizedGroups, err := normalizeSubscriptionPlanGroups(req.Plan.Groups)
+	if err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	req.Plan.Groups = normalizedGroups
 	req.Plan.QuotaResetPeriod = model.NormalizeResetPeriod(req.Plan.QuotaResetPeriod)
 	if req.Plan.QuotaResetPeriod == model.SubscriptionResetCustom && req.Plan.QuotaResetCustomSeconds <= 0 {
 		common.ApiErrorMsg(c, "自定义重置周期需大于0秒")
 		return
 	}
-	err := model.DB.Create(&req.Plan).Error
+	err = model.DB.Create(&req.Plan).Error
 	if err != nil {
 		common.ApiError(c, err)
 		return
@@ -273,13 +310,19 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 			return
 		}
 	}
+	normalizedGroups, err := normalizeSubscriptionPlanGroups(req.Plan.Groups)
+	if err != nil {
+		common.ApiErrorMsg(c, err.Error())
+		return
+	}
+	req.Plan.Groups = normalizedGroups
 	req.Plan.QuotaResetPeriod = model.NormalizeResetPeriod(req.Plan.QuotaResetPeriod)
 	if req.Plan.QuotaResetPeriod == model.SubscriptionResetCustom && req.Plan.QuotaResetCustomSeconds <= 0 {
 		common.ApiErrorMsg(c, "自定义重置周期需大于0秒")
 		return
 	}
 
-	err := model.DB.Transaction(func(tx *gorm.DB) error {
+	err = model.DB.Transaction(func(tx *gorm.DB) error {
 		// update plan (allow zero values updates with map)
 		updateMap := map[string]interface{}{
 			"title":                      req.Plan.Title,
@@ -296,9 +339,10 @@ func AdminUpdateSubscriptionPlan(c *gin.Context) {
 			"waffo_pancake_product_id":   req.Plan.WaffoPancakeProductId,
 			"max_purchase_per_user":      req.Plan.MaxPurchasePerUser,
 			"total_amount":               req.Plan.TotalAmount,
-			"upgrade_group":              req.Plan.UpgradeGroup,
-			"downgrade_group":            req.Plan.DowngradeGroup,
-			"quota_reset_period":         req.Plan.QuotaResetPeriod,
+		"upgrade_group":              req.Plan.UpgradeGroup,
+		"downgrade_group":            req.Plan.DowngradeGroup,
+		"groups":                     req.Plan.Groups,
+		"quota_reset_period":         req.Plan.QuotaResetPeriod,
 			"quota_reset_custom_seconds": req.Plan.QuotaResetCustomSeconds,
 			"updated_at":                 common.GetTimestamp(),
 		}

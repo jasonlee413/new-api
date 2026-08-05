@@ -32,6 +32,7 @@ import {
   sideDrawerSwitchItemClassName,
 } from '@/components/drawer-layout'
 import { Button } from '@/components/ui/button'
+import { Checkbox } from '@/components/ui/checkbox'
 import {
   Form,
   FormControl,
@@ -501,6 +502,46 @@ export function SubscriptionsMutateDrawer({
                   )}
                 />
               </div>
+
+              <FormField
+                control={form.control}
+                name='groups'
+                render={({ field }) => (
+                  <FormItem>
+                    <FormLabel>{t('Visible Groups')}</FormLabel>
+                    <div className='flex flex-wrap gap-x-4 gap-y-2'>
+                      {groupOptions.map((g) => {
+                        const checked = (field.value || []).includes(g)
+                        return (
+                          <label
+                            key={g}
+                            className='flex cursor-pointer items-center gap-2 text-sm'
+                          >
+                            <Checkbox
+                              checked={checked}
+                              onCheckedChange={(v) => {
+                                const current = field.value || []
+                                field.onChange(
+                                  v === true
+                                    ? [...current, g]
+                                    : current.filter((item) => item !== g)
+                                )
+                              }}
+                            />
+                            {g}
+                          </label>
+                        )
+                      })}
+                    </div>
+                    <FormDescription>
+                      {t(
+                        'Only users in the selected groups can see and purchase this plan. Leave empty to make it visible to all groups.'
+                      )}
+                    </FormDescription>
+                    <FormMessage />
+                  </FormItem>
+                )}
+              />
 
               <FormField
                 control={form.control}
