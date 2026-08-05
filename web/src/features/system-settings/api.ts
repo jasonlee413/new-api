@@ -105,3 +105,14 @@ export async function fetchUpstreamRatios(request: FetchUpstreamRatiosRequest) {
   )
   return res.data
 }
+
+export async function uploadPricingCSV(file: File) {
+  const formData = new FormData()
+  formData.append('file', file)
+  const res = await api.post<UpstreamRatiosResponse>(
+    '/api/ratio_sync/fetch_csv',
+    formData,
+    { headers: { 'Content-Type': 'multipart/form-data' } }
+  )
+  return res.data
+}

@@ -31,7 +31,7 @@ import {
   TooltipTrigger,
 } from '@/components/ui/tooltip'
 
-import type { RatioType } from '../types'
+import type { DisplayPriceLine, RatioType } from '../types'
 import {
   getAlignedRatioTypes,
   getPreferredSyncField,
@@ -45,7 +45,30 @@ import type { UpstreamBulkSelectState } from './upstream-ratio-sync-table'
 const syncFieldListClassName = 'flex max-w-full min-w-0 flex-col gap-1.5'
 const syncFieldRowClassName =
   'bg-muted/30 flex h-8 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2'
+// 多行可读价格（如 CSV 阶梯定价逐行条目）使用的行样式：取消固定高度
+const syncFieldRowMultilineClassName =
+  'bg-muted/30 flex min-h-8 w-fit max-w-full min-w-0 items-center gap-2 rounded-md px-2 py-1'
 const syncFieldLabelClassName = 'min-w-[4.5rem] shrink-0'
+
+// CSV 导入时各同步字段的可读价格标签（替换默认的倍率/表达式字段名）
+const CSV_DISPLAY_FIELD_LABELS: Record<string, string> = {
+  model_ratio: 'Input price',
+  completion_ratio: 'Output price',
+  cache_ratio: 'Cache read price',
+  create_cache_ratio: 'Cache write price',
+  model_price: 'Fixed price',
+  billing_expr: 'Billing Price',
+  billing_mode: 'Billing Mode',
+}
+
+// 可读价格行标签 → 徽章配色所用的 ratioType（与左侧当前价格列的字段颜色保持一致）
+const DISPLAY_LINE_COLORS: Record<string, string> = {
+  'Input price': 'model_ratio',
+  'Output price': 'completion_ratio',
+  'Cache read price': 'cache_ratio',
+  'Cache write price': 'create_cache_ratio',
+  'Cache Write (1h)': 'create_cache_ratio',
+}
 
 export function useUpstreamRatioSyncColumns(
   upstreamNames: string[],
@@ -61,7 +84,8 @@ export function useUpstreamRatioSyncColumns(
   ) => void,
   onUnselectValue: (model: string, ratioType: RatioType) => void,
   onBulkSelect: (upstreamName: string) => void,
-  onBulkUnselect: (upstreamName: string) => void
+  onBulkUnselect: (upstreamName: string) => void,
+  displayPrices?: Record<string, Record<string, string | DisplayPriceLine[]>>
 ): ColumnDef<ModelRow>[] {
   const { t } = useTranslation()
 
@@ -226,11 +250,89 @@ export function useUpstreamRatioSyncColumns(
                     ratioType,
                     upstreamName
                   ) === ratioType
+                const displayContent =
+                  displayPrices?.[row.original.model]?.[ratioType]
+                const displayLines = Array.isArray(displayContent)
+                  ? displayContent
+                  : undefined
+                const displayText =
+                  typeof displayContent === 'string' ? displayContent : undefined
+                const isSelected = isSelectedResolutionValue(
+                  resolutions,
+                  row.original.model,
+                  ratioType,
+                  upstreamVal
+                )
+                const handleSelect = () =>
+                  onSelectValue(
+                    row.original.model,
+                    ratioType,
+                    upstreamVal as number | string,
+                    upstreamName
+                  )
+                const handleUnselect = () =>
+                  onUnselectValue(row.original.model, ratioType)
+
+                // 表达式模型的可读价格是逐变量价格行数组：每行一个彩色徽章标签 + 价格，
+                // 与简单模型的字段行样式保持一致；选择仍按 billing_expr 字段整体进行
+                if (
+                  displayLines &&
+                  isVisibleForSource &&
+                  upstreamVal !== undefined &&
+                  upstreamVal !== null &&
+                  upstreamVal !== 'same'
+                ) {
+                  return (
+                    <div
+                      key={ratioType}
+                      className={syncFieldRowMultilineClassName}
+                    >
+                      <div className='flex min-w-0 flex-col gap-1.5'>
+                        {displayLines.map((line) => (
+                          <div
+                            key={line.label}
+                            className='flex h-8 items-center gap-2'
+                          >
+                            <StatusBadge
+                              label={t(line.label)}
+                              autoColor={
+                                DISPLAY_LINE_COLORS[line.label] ?? ratioType
+                              }
+                              size='sm'
+                              copyable={false}
+                              className={syncFieldLabelClassName}
+                            />
+                            {/* 每行都有选中框，状态联动：表达式字段整体选择 */}
+                            <Checkbox
+                              checked={isSelected}
+                              disabled={isDisabled}
+                              onCheckedChange={(checked) => {
+                                if (checked) {
+                                  handleSelect()
+                                } else {
+                                  handleUnselect()
+                                }
+                              }}
+                              className='size-4 shrink-0'
+                            />
+                            <span className='font-mono text-sm whitespace-nowrap'>
+                              {line.value}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )
+                }
 
                 return (
                   <div key={ratioType} className={syncFieldRowClassName}>
                     <StatusBadge
-                      label={getSyncFieldLabel(ratioType, t)}
+                      label={
+                        displayText
+                          ? t(CSV_DISPLAY_FIELD_LABELS[ratioType] ?? ratioType)
+                          : getSyncFieldLabel(ratioType, t)
+                      }
                       autoColor={ratioType}
                       size='sm'
                       copyable={false}
@@ -239,25 +341,14 @@ export function useUpstreamRatioSyncColumns(
                     <div className='min-w-0 flex-1'>
                       {renderUpstreamValue({
                         upstreamVal,
+                        displayText,
                         isAvailable: isVisibleForSource,
                         isConfident,
-                        isSelected: isSelectedResolutionValue(
-                          resolutions,
-                          row.original.model,
-                          ratioType,
-                          upstreamVal
-                        ),
+                        isSelected,
                         isDisabled,
                         t,
-                        onSelect: () =>
-                          onSelectValue(
-                            row.original.model,
-                            ratioType,
-                            upstreamVal as number | string,
-                            upstreamName
-                          ),
-                        onUnselect: () =>
-                          onUnselectValue(row.original.model, ratioType),
+                        onSelect: handleSelect,
+                        onUnselect: handleUnselect,
                       })}
                     </div>
                   </div>
@@ -280,12 +371,14 @@ export function useUpstreamRatioSyncColumns(
     onUnselectValue,
     onBulkSelect,
     onBulkUnselect,
+    displayPrices,
     t,
   ])
 }
 
 type RenderUpstreamValueArgs = {
   upstreamVal: number | string | 'same' | null | undefined
+  displayText?: string
   isAvailable: boolean
   isConfident: boolean
   isSelected: boolean
@@ -296,8 +389,15 @@ type RenderUpstreamValueArgs = {
 }
 
 function renderUpstreamValue(args: RenderUpstreamValueArgs) {
-  const { upstreamVal, isAvailable, isConfident, isSelected, isDisabled, t } =
-    args
+  const {
+    upstreamVal,
+    displayText,
+    isAvailable,
+    isConfident,
+    isSelected,
+    isDisabled,
+    t,
+  } = args
 
   if (!isAvailable) {
     return (
@@ -327,7 +427,9 @@ function renderUpstreamValue(args: RenderUpstreamValueArgs) {
     )
   }
 
-  const text = String(upstreamVal)
+  // CSV 导入时优先展示可读价格文本（如 "4.2 元/M"），选择逻辑仍基于原始值；
+  // 经 t() 处理使 "Expression billing" 等 i18n key 可翻译，价格文本不在词表中则原样返回
+  const text = displayText ? t(displayText) : String(upstreamVal)
 
   return (
     <div className='flex h-full min-w-0 items-center gap-2'>

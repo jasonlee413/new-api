@@ -439,11 +439,21 @@ export type TestResult = {
   error?: string
 }
 
+export type DisplayPriceLine = {
+  label: string
+  value: string
+}
+
 export type UpstreamRatiosResponse = {
   success: boolean
   message: string
   data: {
     differences: DifferencesMap
     test_results: TestResult[]
+    skipped_models?: string[]
+    display_prices?: Record<
+      string,
+      Record<string, string | DisplayPriceLine[]>
+    >
   }
 }

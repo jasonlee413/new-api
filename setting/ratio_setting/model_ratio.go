@@ -409,6 +409,23 @@ func GetModelRatio(name string) (float64, bool, string) {
 	return ratio, true, name
 }
 
+// GetTieredModelRatioDiscount returns the user-configured ModelRatio as a discount
+// coefficient for tiered expression-based billing. It excludes ratios from the
+// hardcoded defaultModelRatio table — those are base multipliers, not discounts.
+// Returns 1.0 when no user discount is configured.
+func GetTieredModelRatioDiscount(modelName string) float64 {
+	name := FormatMatchingModelName(modelName)
+	ratio, ok := modelRatioMap.Get(name)
+	if !ok {
+		return 1.0
+	}
+	// Only treat as discount if the user explicitly overrode the default.
+	if defaultRatio, hasDefault := defaultModelRatio[name]; hasDefault && defaultRatio == ratio {
+		return 1.0
+	}
+	return ratio
+}
+
 func DefaultModelRatio2JSONString() string {
 	jsonBytes, err := common.Marshal(defaultModelRatio)
 	if err != nil {

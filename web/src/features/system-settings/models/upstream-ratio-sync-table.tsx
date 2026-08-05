@@ -35,7 +35,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 
-import type { DifferencesMap, RatioType } from '../types'
+import type { DifferencesMap, DisplayPriceLine, RatioType } from '../types'
 import { RATIO_TYPE_OPTIONS } from './constants'
 import { useUpstreamRatioSyncColumns } from './upstream-ratio-sync-columns'
 import {
@@ -55,6 +55,7 @@ import {
 type UpstreamRatioSyncTableProps = {
   differences: DifferencesMap
   resolutions: ResolutionsMap
+  displayPrices?: Record<string, Record<string, string | DisplayPriceLine[]>>
   isDisabled: boolean
   isSyncing: boolean
   onSelectValue: (
@@ -79,6 +80,7 @@ export type UpstreamBulkSelectState = {
 export function UpstreamRatioSyncTable({
   differences,
   resolutions,
+  displayPrices,
   isDisabled,
   isSyncing,
   onSelectValue,
@@ -217,7 +219,8 @@ export function UpstreamRatioSyncTable({
     onSelectValue,
     onUnselectValue,
     handleBulkSelect,
-    handleBulkUnselect
+    handleBulkUnselect,
+    displayPrices
   )
 
   const { table } = useDataTable({

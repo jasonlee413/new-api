@@ -17,20 +17,28 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 For commercial licensing, please contact support@quantumnous.com
 */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { CheckSquare, RefreshCcw } from 'lucide-react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { CheckSquare, Copy, RefreshCcw, Upload, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 
+import {
+  Alert,
+  AlertAction,
+  AlertDescription,
+  AlertTitle,
+} from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 
 import {
   fetchUpstreamRatios,
   getUpstreamChannels,
   updateSystemOption,
+  uploadPricingCSV,
 } from '../api'
 import type {
   DifferencesMap,
+  DisplayPriceLine,
   RatioType,
   UpstreamChannel,
   UpstreamConfig,
@@ -131,8 +139,12 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   >({})
   const [differences, setDifferences] = useState<DifferencesMap>({})
   const [resolutions, setResolutions] = useState<ResolutionsMap>({})
+  const [displayPrices, setDisplayPrices] = useState<
+    Record<string, Record<string, string | DisplayPriceLine[]>>
+  >({})
   const [conflictItems, setConflictItems] = useState<ConflictItem[]>([])
   const [confirmLoading, setConfirmLoading] = useState(false)
+  const [skippedModels, setSkippedModels] = useState<string[]>([])
 
   const { data: channelsData } = useQuery({
     queryKey: ['upstream-channels'],
@@ -180,6 +192,8 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
 
       setDifferences(diffs)
       setResolutions({})
+      setDisplayPrices({})
+      setSkippedModels([])
 
       if (Object.keys(diffs).length === 0) {
         toast.success(t('No price differences found'))
@@ -191,6 +205,67 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
       toast.error(error.message || t('Failed to fetch upstream prices'))
     },
   })
+
+  const csvFileInputRef = useRef<HTMLInputElement>(null)
+
+  const csvUploadMutation = useMutation({
+    mutationFn: uploadPricingCSV,
+    onSuccess: (data) => {
+      if (!data.success) {
+        toast.error(data.message || t('Failed to parse CSV file'))
+        return
+      }
+
+      const {
+        differences: diffs,
+        skipped_models: skippedModels,
+        display_prices: csvDisplayPrices,
+      } = data.data
+
+      setDifferences(diffs)
+      setResolutions({})
+      setDisplayPrices(csvDisplayPrices ?? {})
+      setSkippedModels(skippedModels ?? [])
+
+      if (skippedModels && skippedModels.length > 0) {
+        toast.warning(
+          t('Skipped {{count}} models that are not available in any enabled channel', {
+            count: skippedModels.length,
+          })
+        )
+      }
+
+      if (Object.keys(diffs).length === 0) {
+        toast.success(t('No price differences found'))
+      } else {
+        toast.success(t('CSV file parsed successfully'))
+      }
+    },
+    onError: (error: Error) => {
+      toast.error(error.message || t('Failed to parse CSV file'))
+    },
+  })
+
+  const handleCSVUploadClick = () => {
+    csvFileInputRef.current?.click()
+  }
+
+  const handleCopySkippedModels = () => {
+    navigator.clipboard.writeText(skippedModels.join('\n'))
+    toast.success(t('Copied'))
+  }
+
+  const handleCSVFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    if (!file) return
+    if (!file.name.toLowerCase().endsWith('.csv')) {
+      toast.error(t('Only .csv files are supported'))
+      e.target.value = ''
+      return
+    }
+    csvUploadMutation.mutate(file)
+    e.target.value = ''
+  }
 
   const { mutate: syncMutate, isPending: isSyncPending } = useMutation({
     mutationFn: async (updates: Array<{ key: string; value: string }>) => {
@@ -315,8 +390,13 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   const getLocalBillingCategory = (
     model: string,
     currentRatios: ParsedRatios
-  ): 'price' | 'ratio' | null => {
+  ): 'price' | 'ratio' | 'tiered' | null => {
     if (currentRatios.ModelPrice[model] !== undefined) return 'price'
+    if (
+      currentRatios['billing_setting.billing_mode']?.[model] ===
+      'tiered_expr'
+    )
+      return 'tiered'
     if (
       currentRatios.ModelRatio[model] !== undefined ||
       currentRatios.CompletionRatio[model] !== undefined ||
@@ -368,6 +448,22 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         }
         if (hasRatio) {
           delete finalRatios.ModelPrice[model]
+        }
+
+        // When applying expression billing (tiered), clean up all legacy ratio/model_price entries.
+        const hasBillingExpr = selectedTypes.some(
+          (rt) => rt === 'billing_mode' || rt === 'billing_expr'
+        )
+        if (hasBillingExpr) {
+          delete finalRatios.ModelRatio[model]
+          delete finalRatios.CompletionRatio[model]
+          delete finalRatios.CacheRatio[model]
+          delete finalRatios.CreateCacheRatio[model]
+          delete finalRatios.ImageRatio[model]
+          delete finalRatios.AudioRatio[model]
+          delete finalRatios.AudioCompletionRatio[model]
+          delete finalRatios.ModelPrice[model]
+          finalRatios.ModelRatio[model] = 1
         }
 
         Object.entries(ratios).forEach(([ratioType, value]) => {
@@ -428,12 +524,16 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         const currentDesc =
           localCat === 'price'
             ? `${fixedPriceLabel}: ${currentRatios.ModelPrice[model]}`
-            : `${modelRatioLabel}: ${currentRatios.ModelRatio[model] ?? '-'}\n${completionRatioLabel}: ${currentRatios.CompletionRatio[model] ?? '-'}`
+            : localCat === 'tiered'
+              ? 'Expression billing'
+              : `${modelRatioLabel}: ${currentRatios.ModelRatio[model] ?? '-'}\n${completionRatioLabel}: ${currentRatios.CompletionRatio[model] ?? '-'}`
 
         const newDesc =
           newCat === 'price'
             ? `${fixedPriceLabel}: ${ratios.model_price}`
-            : `${modelRatioLabel}: ${ratios.model_ratio ?? '-'}\n${completionRatioLabel}: ${ratios.completion_ratio ?? '-'}`
+            : newCat === 'tiered'
+              ? `Expression billing`
+              : `${modelRatioLabel}: ${ratios.model_ratio ?? '-'}\n${completionRatioLabel}: ${ratios.completion_ratio ?? '-'}`
 
         const channelNames = selectedTypes
           .map((rt) => findSourceChannel(model, rt as RatioType, ratios[rt]))
@@ -472,7 +572,11 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   }
 
   const hasSelections = Object.keys(resolutions).length > 0
-  const isLoading = fetchMutation.isPending || isSyncPending || confirmLoading
+  const isLoading =
+    fetchMutation.isPending ||
+    csvUploadMutation.isPending ||
+    isSyncPending ||
+    confirmLoading
 
   return (
     <div className='flex h-full min-h-0 flex-col gap-4'>
@@ -481,6 +585,17 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
           <Button onClick={handleOpenChannelDialog} disabled={isLoading}>
             <RefreshCcw className='mr-2 h-4 w-4' />
             {t('Select Sync Channels')}
+          </Button>
+          <Button
+            variant='outline'
+            onClick={handleCSVUploadClick}
+            disabled={isLoading}
+          >
+            {csvUploadMutation.isPending && (
+              <span className='mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent' />
+            )}
+            <Upload className='mr-2 h-4 w-4' />
+            {t('Upload CSV')}
           </Button>
           <Button
             variant='secondary'
@@ -496,10 +611,64 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         </div>
       </div>
 
+      <input
+        ref={csvFileInputRef}
+        type='file'
+        accept='.csv'
+        className='hidden'
+        onChange={handleCSVFileChange}
+      />
+
+      {skippedModels.length > 0 && (
+        <Alert className='shrink-0'>
+          <AlertTitle>
+            {t('Skipped {{count}} models that are not available in any enabled channel', {
+              count: skippedModels.length,
+            })}
+          </AlertTitle>
+          <AlertDescription>
+            {t(
+              'Only models available in enabled channels or already configured locally can be imported'
+            )}
+          </AlertDescription>
+          <div className='col-span-full max-h-32 overflow-y-auto'>
+            <div className='flex flex-wrap gap-1 pt-1'>
+              {skippedModels.map((model) => (
+                <span
+                  key={model}
+                  className='bg-muted rounded px-1.5 py-0.5 font-mono text-xs'
+                >
+                  {model}
+                </span>
+              ))}
+            </div>
+          </div>
+          <AlertAction className='flex gap-1'>
+            <Button
+              variant='ghost'
+              size='icon-xs'
+              onClick={handleCopySkippedModels}
+              title={t('Copy')}
+            >
+              <Copy />
+            </Button>
+            <Button
+              variant='ghost'
+              size='icon-xs'
+              onClick={() => setSkippedModels([])}
+              title={t('Close')}
+            >
+              <X />
+            </Button>
+          </AlertAction>
+        </Alert>
+      )}
+
       <div className='min-h-0 flex-1'>
         <UpstreamRatioSyncTable
           differences={differences}
           resolutions={resolutions}
+          displayPrices={displayPrices}
           isDisabled={isLoading}
           isSyncing={fetchMutation.isPending}
           onSelectValue={handleSelectValue}
