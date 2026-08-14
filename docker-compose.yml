@@ -12,12 +12,12 @@
 #
 # ⚠️  IMPORTANT: Change all default passwords before deploying to production!
 
-version: '3.4' # For compatibility with older Docker versions
+#version: '3.4' # For compatibility with older Docker versions
 
 services:
   new-api:
   # image: calciumion/new-api:latest
-    image: new-api:1.1
+    image: new-api:1.2
     container_name: new-api
     restart: always
     command: --log-dir /app/logs
@@ -27,21 +27,21 @@ services:
       - ./data:/data
       - ./logs:/app/logs
     environment:
-      - SQL_DSN=postgresql://root:123456@postgres:5432/new-api # ⚠️ IMPORTANT: Change the password in production!
+      - SQL_DSN=postgresql://root:3b2ad8123541448a@postgres:5432/new-api
 #      - SQL_DSN=root:123456@tcp(mysql:3306)/new-api  # Point to the mysql service, uncomment if using MySQL
 #      - LOG_SQL_DSN=postgresql://root:123456@postgres:5432/new-api-log # OPTIONAL: If you want a separate database for logging, uncomment and set this
 #      - LOG_SQL_DSN=clickhouse://default:123456@clickhouse:9000/new_api_logs # OPTIONAL: Use ClickHouse for logs only; also uncomment clickhouse in depends_on and the clickhouse service below
 #      - LOG_SQL_CLICKHOUSE_TTL_DAYS=0 # OPTIONAL: ClickHouse log retention days. Unset or 0 disables automatic deletion; set to e.g. 30 to keep 30 days
-      - REDIS_CONN_STRING=redis://:123456@redis:6379 # ⚠️ IMPORTANT: Change the password in production!
+      - REDIS_CONN_STRING=redis://:f7c7ab0e5f4f445b@redis:6379
       - TZ=Asia/Shanghai
       - ERROR_LOG_ENABLED=true # 是否启用错误日志记录 (Whether to enable error log recording)
       - BATCH_UPDATE_ENABLED=true  # 是否启用批量更新 (Whether to enable batch update)
       - NODE_NAME=new-api-node-1  # 节点名称，用于审计日志中标识节点身份；多节点/容器部署时建议设置 (Node name used in audit logs; recommended when running multiple instances or in containers)
       - CRITICAL_RATE_LIMIT_ENABLE=false
-      - RELAY_TIMEOUT=120        # 新增，单位秒
-      - STREAMING_TIMEOUT=120  # 流模式无响应超时时间，单位秒，默认120秒，如果出现空补全可以尝试改为更大值 （Streaming timeout in seconds, default is 120s. Increase if experiencing empty completions）
+      - STREAMING_TIMEOUT=240  # 流模式无响应超时时间，单位秒，默认120秒，如果出现空补全可以尝试改为更大值 （Streaming timeout in seconds, default is 120s. Increase if experiencing empty completions）
+#      - RELAY_TIMEOUT=120        # 新增，单位秒
 #      - RELAY_IDLE_CONN_TIMEOUT=90  # Relay HTTP 客户端空闲连接超时时间，单位秒，默认跟随 Go 标准库，设置为0表示不限制 (Relay HTTP client idle keep-alive timeout in seconds, defaults to Go standard library; set 0 to disable)
-#      - SESSION_SECRET=random_string  # 多机部署时设置，必须修改这个随机字符串！！ （multi-node deployment, set this to a random string!!!!!!!）
+      - SESSION_SECRET=0b276b5ea0cc4d64bd6d4a257b9aa0faf9a6ee33cf444d2ab7d9a4b36fbf9541
 #      - SESSION_COOKIE_SECURE=true  # true：启用 Secure Refresh Cookie 和严格 refresh/logout OriginGuard；false/未配置：关闭 OriginGuard，仅用于本地 HTTP (true: Secure cookie + strict refresh/logout OriginGuard; false/unset: guard disabled for local HTTP only)
 #      - SESSION_COOKIE_TRUSTED_URL=https://example.com,https://admin.example.com  # Secure=true 时必填的精确 HTTPS Origin；不是 relay CORS 白名单，不支持通配符/路径 (Required exact HTTPS origins when Secure=true; not a relay CORS allowlist, no wildcard/path)
 #      - TRUSTED_PROXIES=172.20.0.0/16  # 未配置时信任回环/RFC1918/fc00::/7 并告警，none 为严格模式，显式列表替代默认值 (Unset trusts loopback/RFC 1918/fc00::/7 with a warning; none trusts no proxies; an explicit list replaces defaults)
@@ -68,11 +68,27 @@ services:
       timeout: 10s
       retries: 3
 
+  nginx:
+    image: nginx:stable-alpine
+    container_name: nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - ./nginx/logs:/var/log/nginx
+    networks:
+      - new-api-network
+    depends_on:
+      - new-api
+
   redis:
     image: redis:latest
     container_name: redis
     restart: always
-    command: ["redis-server", "--requirepass", "123456"]  # ⚠️ IMPORTANT: Change this password in production!
+    command: ["redis-server", "--requirepass", "f7c7ab0e5f4f445b"]
     networks:
       - new-api-network
 
@@ -82,7 +98,7 @@ services:
     restart: always
     environment:
       POSTGRES_USER: root
-      POSTGRES_PASSWORD: 123456  # ⚠️ IMPORTANT: Change this password in production!
+      POSTGRES_PASSWORD: 3b2ad8123541448a
       POSTGRES_DB: new-api
     volumes:
       - pg_data:/var/lib/postgresql/data
