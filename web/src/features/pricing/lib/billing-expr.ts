@@ -237,7 +237,21 @@ export type TierCondition = {
 export type ParsedTier = {
   label: string
   conditions: TierCondition[]
+  /** Time-of-day periods gating this tier (peak/off-peak pricing) */
+  timePeriods?: ParsedTimePeriod[]
+  /** True when this tier is the else-branch of a time-sliced expression */
+  timeFallback?: boolean
   [field: string]: unknown
+}
+
+export type ParsedTimePeriod = {
+  /** "HH:MM" */
+  start: string
+  /** "HH:MM" */
+  end: string
+  /** Range wraps past midnight (e.g. 18:00-08:00) */
+  crossMidnight: boolean
+  timezone: string
 }
 
 // ---------------------------------------------------------------------------
@@ -265,40 +279,207 @@ function parseTierBody(bodyStr: string): Record<string, number> {
   return tier
 }
 
+/** Extract every `tier("label", body)` call (optionally gated by p/c/len conditions) */
+function extractTierCalls(body: string): ParsedTier[] {
+  const condGroup =
+    `((?:(?:p|c|len)\\s*(?:<|<=|>|>=)\\s*[\\d.eE+]+)` +
+    `(?:\\s*&&\\s*(?:p|c|len)\\s*(?:<|<=|>|>=)\\s*[\\d.eE+]+)*)`
+  const tierRe = new RegExp(
+    `(?:${condGroup}\\s*\\?\\s*)?tier\\("([^"]*)",\\s*([^)]+)\\)`,
+    'g'
+  )
+  const tiers: ParsedTier[] = []
+  let m
+  while ((m = tierRe.exec(body)) !== null) {
+    const condStr = m[1] || ''
+    const conditions: TierCondition[] = []
+    if (condStr) {
+      for (const cp of condStr.split(/\s*&&\s*/)) {
+        const cm = cp.trim().match(/^(p|c|len)\s*(<|<=|>|>=)\s*([\d.eE+]+)$/)
+        if (cm) {
+          conditions.push({
+            var: cm[1] as TierCondition['var'],
+            op: cm[2] as TierCondition['op'],
+            value: Number(cm[3]),
+          })
+        }
+      }
+    }
+    const tier = parseTierBody(m[3]) as ParsedTier
+    tier.label = m[2]
+    tier.conditions = conditions
+    tiers.push(tier)
+  }
+  return tiers
+}
+
+/** Strip redundant outer parentheses, e.g. "(a ? b : c)" → "a ? b : c" */
+function stripOuterParens(s: string): string {
+  let result = s.trim()
+  for (;;) {
+    if (!result.startsWith('(') || !result.endsWith(')')) return result
+    let depth = 0
+    let wrapsAll = true
+    for (let i = 0; i < result.length; i++) {
+      const ch = result[i]
+      if (ch === '(') depth++
+      else if (ch === ')') {
+        depth--
+        if (depth === 0 && i < result.length - 1) {
+          wrapsAll = false
+          break
+        }
+        if (depth < 0) return result
+      }
+    }
+    if (!wrapsAll || depth !== 0) return result
+    result = result.slice(1, -1).trim()
+  }
+}
+
+/** Split `cond ? branch : elseBranch` at top level; null when no top-level ternary */
+function splitTopLevelTernary(
+  s: string
+): { cond: string; branch: string; elseBranch: string } | null {
+  let depth = 0
+  let qIdx = -1
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === '(') depth++
+    else if (ch === ')') depth--
+    else if (depth === 0 && ch === '?') {
+      qIdx = i
+      break
+    }
+  }
+  if (qIdx < 0) return null
+  depth = 0
+  for (let i = qIdx + 1; i < s.length; i++) {
+    const ch = s[i]
+    if (ch === '(') depth++
+    else if (ch === ')') depth--
+    else if (depth === 0 && ch === ':') {
+      return {
+        cond: s.slice(0, qIdx).trim(),
+        branch: s.slice(qIdx + 1, i).trim(),
+        elseBranch: s.slice(i + 1).trim(),
+      }
+    }
+  }
+  return null
+}
+
+const MINUTE_COND_SEGMENT_REGEX =
+  /hour\("([^"]+)"\)\s*\*\s*60\s*\+\s*minute\("([^"]+)"\)\s*>=\s*(\d+)\s*(&&|\|\|)\s*hour\("([^"]+)"\)\s*\*\s*60\s*\+\s*minute\("([^"]+)"\)\s*<\s*(\d+)/g
+
+function formatMinutesOfDay(mins: number): string {
+  return `${String(Math.floor(mins / 60)).padStart(2, '0')}:${String(mins % 60).padStart(2, '0')}`
+}
+
+/**
+ * Parse a minute-based time-of-day condition emitted by the CSV importer:
+ * `hour(tz) * 60 + minute(tz) >= 540 && hour(tz) * 60 + minute(tz) < 720 || ...`
+ * A `||` between `>=` and `<` marks a cross-midnight range. Returns null when
+ * the condition is not purely composed of such segments.
+ */
+export function tryParseMinuteTimeCondition(
+  cond: string
+): ParsedTimePeriod[] | null {
+  const re = new RegExp(MINUTE_COND_SEGMENT_REGEX.source, 'g')
+  const ranges: ParsedTimePeriod[] = []
+  let m
+  while ((m = re.exec(cond)) !== null) {
+    const tz = m[1]
+    if (m[2] !== tz || m[5] !== tz || m[6] !== tz) return null
+    ranges.push({
+      start: formatMinutesOfDay(Number(m[3])),
+      end: formatMinutesOfDay(Number(m[7])),
+      crossMidnight: m[4] === '||',
+      timezone: tz,
+    })
+  }
+  if (ranges.length === 0) return null
+  const rest = cond.replace(new RegExp(MINUTE_COND_SEGMENT_REGEX.source, 'g'), '')
+  if (rest.replace(/[\s|()]/g, '') !== '') return null
+  return ranges
+}
+
+/**
+ * Parse a time-sliced ternary chain:
+ * `timeCond ? tier("peak", ...) : (tier("normal", ...))`.
+ * Branch tiers inherit the branch time periods; the final else-branch tiers
+ * are flagged as `timeFallback`. Returns null when the expression is not a
+ * time-sliced chain.
+ */
+function tryParseTimeSlicedTiers(body: string): ParsedTier[] | null {
+  const inner = stripOuterParens(body)
+  const split = splitTopLevelTernary(inner)
+  if (!split) return null
+  const ranges = tryParseMinuteTimeCondition(split.cond)
+  if (!ranges) return null
+
+  const thenTiers = extractTierCalls(stripOuterParens(split.branch))
+  if (thenTiers.length === 0) return null
+  for (const tier of thenTiers) {
+    tier.timePeriods = ranges
+  }
+
+  const elseInner = stripOuterParens(split.elseBranch)
+  const nested = tryParseTimeSlicedTiers(elseInner)
+  if (nested) return [...thenTiers, ...nested]
+
+  let elseTiers = extractTierCalls(elseInner)
+  if (elseTiers.length === 0) {
+    const plain = tryParsePlainSumTier(elseInner)
+    elseTiers = plain ? [plain] : []
+  }
+  if (elseTiers.length === 0) return null
+  for (const tier of elseTiers) {
+    tier.timeFallback = true
+  }
+  return [...thenTiers, ...elseTiers]
+}
+
+/**
+ * Fallback for plain sum expressions without any tier() wrapper, e.g.
+ * `p*36.5 + c*182.5 + cr*3.56`. Returns a single synthetic tier carrying the
+ * per-variable coefficients, or null when the body is not a pure sum.
+ */
+function tryParsePlainSumTier(body: string): ParsedTier | null {
+  if (!body) return null
+  if (body.includes('?') || body.includes('tier(')) return null
+  if (TIME_FUNCS.some((fn) => body.includes(`${fn}(`))) return null
+  const re = new RegExp(BILLING_VAR_REGEX.source, 'g')
+  const coeffs: Record<string, number> = {}
+  let m
+  let matched = false
+  while ((m = re.exec(body)) !== null) {
+    if (!(m[1] in coeffs)) coeffs[m[1]] = Number(m[2])
+    matched = true
+  }
+  if (!matched) return null
+  const rest = body.replace(new RegExp(BILLING_VAR_REGEX.source, 'g'), '')
+  if (rest.replace(/[\s()+]/g, '') !== '') return null
+  const tier: Record<string, number> = {}
+  for (const [varName, field] of Object.entries(BILLING_VAR_KEY_TO_FIELD)) {
+    tier[field] = coeffs[varName] || 0
+  }
+  const parsed = tier as unknown as ParsedTier
+  parsed.label = ''
+  parsed.conditions = []
+  return parsed
+}
+
 export function parseTiersFromExpr(exprStr: string): ParsedTier[] {
   if (!exprStr) return []
   try {
     const { body } = stripExprVersion(exprStr)
-    const condGroup =
-      `((?:(?:p|c|len)\\s*(?:<|<=|>|>=)\\s*[\\d.eE+]+)` +
-      `(?:\\s*&&\\s*(?:p|c|len)\\s*(?:<|<=|>|>=)\\s*[\\d.eE+]+)*)`
-    const tierRe = new RegExp(
-      `(?:${condGroup}\\s*\\?\\s*)?tier\\("([^"]*)",\\s*([^)]+)\\)`,
-      'g'
-    )
-    const tiers: ParsedTier[] = []
-    let m
-    while ((m = tierRe.exec(body)) !== null) {
-      const condStr = m[1] || ''
-      const conditions: TierCondition[] = []
-      if (condStr) {
-        for (const cp of condStr.split(/\s*&&\s*/)) {
-          const cm = cp.trim().match(/^(p|c|len)\s*(<|<=|>|>=)\s*([\d.eE+]+)$/)
-          if (cm) {
-            conditions.push({
-              var: cm[1] as TierCondition['var'],
-              op: cm[2] as TierCondition['op'],
-              value: Number(cm[3]),
-            })
-          }
-        }
-      }
-      const tier = parseTierBody(m[3]) as ParsedTier
-      tier.label = m[2]
-      tier.conditions = conditions
-      tiers.push(tier)
-    }
-    return tiers
+    const timeSliced = tryParseTimeSlicedTiers(body)
+    if (timeSliced) return timeSliced
+    const tiers = extractTierCalls(body)
+    if (tiers.length > 0) return tiers
+    const plain = tryParsePlainSumTier(body)
+    return plain ? [plain] : []
   } catch {
     return []
   }

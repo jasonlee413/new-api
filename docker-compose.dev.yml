@@ -12,7 +12,7 @@
 #
 # ⚠️  IMPORTANT: Change all default passwords before deploying to production!
 
-version: '3.4' # For compatibility with older Docker versions
+#version: '3.4' # For compatibility with older Docker versions
 
 services:
   new-api:
@@ -68,21 +68,21 @@ services:
       timeout: 10s
       retries: 3
 
-  nginx:
-    image: nginx:stable-alpine
-    container_name: nginx
-    restart: always
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - ./nginx/conf.d:/etc/nginx/conf.d:ro
-      - ./nginx/ssl:/etc/nginx/ssl:ro
-      - ./nginx/logs:/var/log/nginx
-    networks:
-      - new-api-network
-    depends_on:
-      - new-api
+  # nginx:
+  #   image: nginx:stable-alpine
+  #   container_name: nginx
+  #   restart: always
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx/conf.d:/etc/nginx/conf.d:ro
+  #     - ./nginx/ssl:/etc/nginx/ssl:ro
+  #     - ./nginx/logs:/var/log/nginx
+  #   networks:
+  #     - new-api-network
+  #   depends_on:
+  #     - new-api
 
   redis:
     image: redis:latest

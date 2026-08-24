@@ -111,6 +111,24 @@ function formatConditionSummary(
     .join(' && ')
 }
 
+function formatTimeSummary(
+  tier: ParsedTier,
+  t: (key: string) => string
+): string {
+  const periods = tier.timePeriods
+  if (periods && periods.length > 0) {
+    const text = periods
+      .map(
+        (p) =>
+          `${p.start}~${p.end}${p.crossMidnight ? `(${t('next day')})` : ''}`
+      )
+      .join('、')
+    return `${text} (${periods[0].timezone})`
+  }
+  if (tier.timeFallback) return t('Other hours')
+  return ''
+}
+
 function describeCondition(
   cond: RequestCondition,
   t: (key: string) => string
@@ -262,6 +280,7 @@ export function DynamicPricingBreakdown({
           <div className='space-y-1.5 sm:hidden'>
             {tiers.map((tier, i) => {
               const condSummary = formatConditionSummary(tier.conditions, t)
+              const timeSummary = formatTimeSummary(tier, t)
               const isMatched =
                 matchedTierLabel != null &&
                 matchedTierLabel !== '' &&
@@ -293,6 +312,11 @@ export function DynamicPricingBreakdown({
                   {condSummary && (
                     <div className='text-muted-foreground mb-1.5 text-xs'>
                       {condSummary}
+                    </div>
+                  )}
+                  {timeSummary && (
+                    <div className='text-muted-foreground mb-1.5 text-xs'>
+                      {timeSummary}
                     </div>
                   )}
                   <div className='grid grid-cols-2 gap-x-3 gap-y-1.5'>
@@ -353,6 +377,7 @@ export function DynamicPricingBreakdown({
                 cellClassName: cn('align-top', compact ? 'py-2' : 'py-2.5'),
                 cell: (tier) => {
                   const condSummary = formatConditionSummary(tier.conditions, t)
+                  const timeSummary = formatTimeSummary(tier, t)
                   const isMatched =
                     normalizedMatchedTierLabel !== '' &&
                     normalizeTierLabel(tier.label) ===
@@ -378,6 +403,11 @@ export function DynamicPricingBreakdown({
                       {condSummary && (
                         <div className='text-muted-foreground mt-1 text-xs'>
                           {condSummary}
+                        </div>
+                      )}
+                      {timeSummary && (
+                        <div className='text-muted-foreground mt-1 text-xs'>
+                          {timeSummary}
                         </div>
                       )}
                     </>

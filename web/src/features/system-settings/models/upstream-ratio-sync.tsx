@@ -212,7 +212,7 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
     mutationFn: uploadPricingCSV,
     onSuccess: (data) => {
       if (!data.success) {
-        toast.error(data.message || t('Failed to parse CSV file'))
+        toast.error(data.message || t('Failed to parse pricing file'))
         return
       }
 
@@ -238,11 +238,11 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
       if (Object.keys(diffs).length === 0) {
         toast.success(t('No price differences found'))
       } else {
-        toast.success(t('CSV file parsed successfully'))
+        toast.success(t('Pricing file parsed successfully'))
       }
     },
     onError: (error: Error) => {
-      toast.error(error.message || t('Failed to parse CSV file'))
+      toast.error(error.message || t('Failed to parse pricing file'))
     },
   })
 
@@ -258,8 +258,9 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   const handleCSVFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
-    if (!file.name.toLowerCase().endsWith('.csv')) {
-      toast.error(t('Only .csv files are supported'))
+    const name = file.name.toLowerCase()
+    if (!name.endsWith('.csv') && !name.endsWith('.xlsx')) {
+      toast.error(t('Only .csv and .xlsx files are supported'))
       e.target.value = ''
       return
     }
@@ -528,12 +529,11 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
               ? 'Expression billing'
               : `${modelRatioLabel}: ${currentRatios.ModelRatio[model] ?? '-'}\n${completionRatioLabel}: ${currentRatios.CompletionRatio[model] ?? '-'}`
 
+        // 此分支内 newCat 已排除 'tiered'（见上方守卫），仅可能是 price/ratio
         const newDesc =
           newCat === 'price'
             ? `${fixedPriceLabel}: ${ratios.model_price}`
-            : newCat === 'tiered'
-              ? `Expression billing`
-              : `${modelRatioLabel}: ${ratios.model_ratio ?? '-'}\n${completionRatioLabel}: ${ratios.completion_ratio ?? '-'}`
+            : `${modelRatioLabel}: ${ratios.model_ratio ?? '-'}\n${completionRatioLabel}: ${ratios.completion_ratio ?? '-'}`
 
         const channelNames = selectedTypes
           .map((rt) => findSourceChannel(model, rt as RatioType, ratios[rt]))
@@ -595,7 +595,7 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
               <span className='mr-2 h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent' />
             )}
             <Upload className='mr-2 h-4 w-4' />
-            {t('Upload CSV')}
+            {t('Upload CSV/Excel')}
           </Button>
           <Button
             variant='secondary'
@@ -614,7 +614,7 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
       <input
         ref={csvFileInputRef}
         type='file'
-        accept='.csv'
+        accept='.csv,.xlsx'
         className='hidden'
         onChange={handleCSVFileChange}
       />

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -20,10 +21,11 @@ import (
 	"github.com/QuantumNous/new-api/setting/billing_setting"
 
 	"github.com/gin-gonic/gin"
+	"github.com/xuri/excelize/v2"
 )
 
 const (
-	csvImportChannelName = "CSV 文件导入"
+	csvImportChannelName = "CSV/Excel 文件导入"
 	maxCSVFileSize       = 10 << 20 // 10MB
 )
 
@@ -95,14 +97,45 @@ type displayPriceLine struct {
 
 var tierBoundRegex = regexp.MustCompile(`输入长度\([^,]+,\s*([0-9.]+)\s*([KkMm])?\s*\]`)
 
-// parseDesc 将"说明"列拆分为类型与条件，如 "输入 - 输入长度(0, 512K]" → ("输入", "输入长度(0, 512K]")
+// parseDesc 将"说明"列拆分为类型与条件，如 "输入 - 输入长度(0, 512K]" → ("输入", "输入长度(0, 512K]")。
+// 优先按 " - "（带空格）拆分；拆出的类型无法识别时，回退为已知类型最长前缀匹配，
+// 以兼容 "输入-峰时 09:00-12:00（北京时间）" 这类无空格分隔的格式。
 func parseDesc(desc string) (typ, cond string) {
-	parts := strings.SplitN(desc, " - ", 2)
-	typ = strings.TrimSpace(parts[0])
-	if len(parts) > 1 {
-		cond = strings.TrimSpace(parts[1])
+	desc = strings.TrimSpace(desc)
+	legacyTyp := desc
+	legacyCond := ""
+	if parts := strings.SplitN(desc, " - ", 2); len(parts) == 2 {
+		legacyTyp = strings.TrimSpace(parts[0])
+		legacyCond = strings.TrimSpace(parts[1])
 	}
-	return
+	if _, ok := csvDescTypeToVar[legacyTyp]; ok {
+		return legacyTyp, legacyCond
+	}
+	if csvDescTypeSkip[legacyTyp] {
+		return legacyTyp, legacyCond
+	}
+	// 最长前缀匹配：要求前缀后紧跟分隔符（-、–、— 或空白），避免 "输入输出比" 误匹配 "输入"
+	best := ""
+	for key := range csvDescTypeToVar {
+		if len(key) > len(best) && strings.HasPrefix(desc, key) {
+			best = key
+		}
+	}
+	for key := range csvDescTypeSkip {
+		if len(key) > len(best) && strings.HasPrefix(desc, key) {
+			best = key
+		}
+	}
+	if best == "" {
+		return legacyTyp, legacyCond
+	}
+	rest := desc[len(best):]
+	if rest != "" && !strings.HasPrefix(rest, "-") && !strings.HasPrefix(rest, "–") &&
+		!strings.HasPrefix(rest, "—") && !strings.HasPrefix(rest, " ") && !strings.HasPrefix(rest, "\t") {
+		return legacyTyp, legacyCond
+	}
+	cond = strings.TrimSpace(strings.TrimLeft(rest, "-–—"))
+	return best, cond
 }
 
 // parseTierUpperBound 从条件中提取阶梯上限，"输入长度(0, 512K]" → 512000；无阶梯返回 0
@@ -124,9 +157,191 @@ func parseTierUpperBound(cond string) int64 {
 	return int64(num)
 }
 
+// ---------------------------------------------------------------------------
+// 峰谷时段条件解析
+// ---------------------------------------------------------------------------
+
+// minuteRange 一天内的分钟数区间 [Start, End)，End <= Start 表示跨午夜（如 18:00-次日08:00）
+type minuteRange struct {
+	Start int
+	End   int
+}
+
+// timePeriodCond 一个计费时段条件：标签 + 时区 + 若干分钟数区间
+type timePeriodCond struct {
+	Label    string // 时段标签（如 "峰时"/"谷时"），用作 tier label
+	Timezone string // IANA 时区（如 "Asia/Shanghai"）
+	Ranges   []minuteRange
+}
+
+var timeRangeRegex = regexp.MustCompile(`(\d{1,2}):(\d{2})\s*-\s*(次日)?(\d{1,2}):(\d{2})`)
+var tzTextRegex = regexp.MustCompile(`[（(]([^（）()]*)[）)]`)
+
+// csvTimezoneAliases 说明文字中的时区别名 → IANA 时区
+var csvTimezoneAliases = map[string]string{
+	"北京时间":  "Asia/Shanghai",
+	"北京":    "Asia/Shanghai",
+	"中国标准时间": "Asia/Shanghai",
+	"Asia/Shanghai": "Asia/Shanghai",
+	"UTC+8":   "Asia/Shanghai",
+	"utc+8":   "Asia/Shanghai",
+}
+
+// parseTimePeriodCondition 从条件文字解析时段条件，
+// 如 "峰时 09:00-12:00、14:00-18:00（北京时间）"。
+// 非时段条件（无时间范围）返回 (nil, nil)；结构类似但内容非法时返回错误。
+func parseTimePeriodCondition(cond string) (*timePeriodCond, error) {
+	if cond == "" || cond == "默认" {
+		return nil, nil
+	}
+	rest := cond
+	tz := "Asia/Shanghai" // 未标注时区时默认北京时间
+	if m := tzTextRegex.FindStringSubmatch(rest); m != nil {
+		text := strings.TrimSpace(m[1])
+		mapped, ok := csvTimezoneAliases[text]
+		if !ok {
+			return nil, fmt.Errorf("无法识别的时区: %q", text)
+		}
+		tz = mapped
+		rest = tzTextRegex.ReplaceAllString(rest, "")
+	}
+	matches := timeRangeRegex.FindAllStringSubmatchIndex(rest, -1)
+	if len(matches) == 0 {
+		return nil, nil
+	}
+	// 标签 = 首个时间范围之前的文字；范围之后只允许分隔符与空白
+	label := strings.TrimSpace(rest[:matches[0][0]])
+	label = strings.TrimRight(label, "、，, ")
+	if label == "" {
+		return nil, fmt.Errorf("时段条件缺少标签: %q", cond)
+	}
+	tail := strings.TrimSpace(rest[matches[len(matches)-1][1]:])
+	if strings.Trim(tail, "、，, ") != "" {
+		return nil, fmt.Errorf("时段条件包含无法识别的内容: %q", cond)
+	}
+	ranges := make([]minuteRange, 0, len(matches))
+	for _, idx := range matches {
+		m := timeRangeRegex.FindStringSubmatch(rest[idx[0]:idx[1]])
+		startH, _ := strconv.Atoi(m[1])
+		startM, _ := strconv.Atoi(m[2])
+		nextDay := m[3] != ""
+		endH, _ := strconv.Atoi(m[4])
+		endM, _ := strconv.Atoi(m[5])
+		if startH > 23 || endH > 23 || startM > 59 || endM > 59 {
+			return nil, fmt.Errorf("时段超出合法时间: %q", rest[idx[0]:idx[1]])
+		}
+		start := startH*60 + startM
+		end := endH*60 + endM
+		if start == end {
+			return nil, fmt.Errorf("时段起止时间相同: %q", rest[idx[0]:idx[1]])
+		}
+		if nextDay && end > start {
+			return nil, fmt.Errorf("次日标记但结束时间晚于开始时间: %q", rest[idx[0]:idx[1]])
+		}
+		ranges = append(ranges, minuteRange{Start: start, End: end})
+	}
+	return &timePeriodCond{Label: label, Timezone: tz, Ranges: ranges}, nil
+}
+
+// sameTimePeriod 判断两个时段条件的时区与范围是否一致（范围顺序无关）
+func sameTimePeriod(a, b *timePeriodCond) bool {
+	if a.Timezone != b.Timezone || len(a.Ranges) != len(b.Ranges) {
+		return false
+	}
+	for _, ra := range a.Ranges {
+		found := false
+		for _, rb := range b.Ranges {
+			if ra == rb {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// exprCondition 生成时段条件的表达式文本，按"分钟数"比较以兼容非整点。
+// 单段：mins >= 540 && mins < 720；跨午夜：mins >= 1080 || mins < 480；多段以 || 连接。
+func (tp *timePeriodCond) exprCondition() string {
+	mins := fmt.Sprintf(`hour(%q) * 60 + minute(%q)`, tp.Timezone, tp.Timezone)
+	parts := make([]string, 0, len(tp.Ranges))
+	for _, r := range tp.Ranges {
+		if r.End > r.Start {
+			parts = append(parts, fmt.Sprintf("%s >= %d && %s < %d", mins, r.Start, mins, r.End))
+		} else {
+			parts = append(parts, fmt.Sprintf("%s >= %d || %s < %d", mins, r.Start, mins, r.End))
+		}
+	}
+	return strings.Join(parts, " || ")
+}
+
 // formatPrice 输出最简十进制价格字符串，避免浮点尾巴（如 0.30000000000000004）
 func formatPrice(price float64) string {
 	return strconv.FormatFloat(price, 'f', -1, 64)
+}
+
+// priceColumns 必需字段在表头中的列索引
+type priceColumns struct {
+	modelID int
+	desc    int
+	price   int
+	unit    int
+}
+
+// maxIndex 必需列中的最大列索引，用于判断数据行列数是否足够
+func (c priceColumns) maxIndex() int {
+	m := c.modelID
+	for _, i := range []int{c.desc, c.price, c.unit} {
+		if i > m {
+			m = i
+		}
+	}
+	return m
+}
+
+// locatePriceColumns 按表头名称定位必需列，兼容 5 列 CSV 格式
+// （模型ID/计费单元/说明/标价(元)/单位）与含附加列（模型介绍、厂商等）的 Excel 格式
+func locatePriceColumns(header []string) (priceColumns, error) {
+	cols := priceColumns{modelID: -1, desc: -1, price: -1, unit: -1}
+	for i, h := range header {
+		switch h = strings.TrimSpace(h); {
+		case h == "模型ID":
+			cols.modelID = i
+		case h == "说明":
+			cols.desc = i
+		case strings.HasPrefix(h, "标价"):
+			cols.price = i
+		case h == "单位":
+			cols.unit = i
+		}
+	}
+	if cols.modelID < 0 || cols.desc < 0 || cols.price < 0 || cols.unit < 0 {
+		return cols, fmt.Errorf("表头缺少必需列（模型ID/说明/标价/单位），实际表头: %q", header)
+	}
+	return cols, nil
+}
+
+var errRecordTooShort = errors.New("记录列数不足")
+
+// extractPriceRow 按列索引从一条数据记录提取价格行；
+// 列数不足返回 errRecordTooShort，价格非法返回带原文的错误以便调用方记录日志
+func extractPriceRow(record []string, cols priceColumns) (csvPriceRow, error) {
+	if len(record) <= cols.maxIndex() {
+		return csvPriceRow{}, errRecordTooShort
+	}
+	price, err := strconv.ParseFloat(strings.TrimSpace(record[cols.price]), 64)
+	if err != nil || !isValidNonNegativeCost(price) {
+		return csvPriceRow{}, fmt.Errorf("价格无效: %q", record[cols.price])
+	}
+	return csvPriceRow{
+		ModelID: strings.TrimSpace(record[cols.modelID]),
+		Desc:    strings.TrimSpace(record[cols.desc]),
+		Price:   price,
+		Unit:    strings.TrimSpace(record[cols.unit]),
+	}, nil
 }
 
 // parseCSVRows 解析 CSV 全部数据行，自动跳过 UTF-8 BOM 与表头
@@ -144,8 +359,9 @@ func parseCSVRows(reader io.Reader, ctx context.Context) ([]csvPriceRow, error) 
 	if err != nil {
 		return nil, fmt.Errorf("读取 CSV 表头失败: %w", err)
 	}
-	if len(header) < 5 {
-		return nil, fmt.Errorf("CSV 表头列数不足: 期望至少 5 列，实际 %d 列", len(header))
+	cols, err := locatePriceColumns(header)
+	if err != nil {
+		return nil, err
 	}
 
 	var rows []csvPriceRow
@@ -160,20 +376,55 @@ func parseCSVRows(reader io.Reader, ctx context.Context) ([]csvPriceRow, error) 
 			logger.LogWarn(ctx, fmt.Sprintf("CSV 第 %d 行解析失败: %v", lineNum, err))
 			continue
 		}
-		if len(record) < 5 {
+		row, err := extractPriceRow(record, cols)
+		if errors.Is(err, errRecordTooShort) {
 			continue
 		}
-		price, err := strconv.ParseFloat(strings.TrimSpace(record[3]), 64)
-		if err != nil || !isValidNonNegativeCost(price) {
-			logger.LogWarn(ctx, fmt.Sprintf("CSV 第 %d 行价格无效: %q", lineNum, record[3]))
+		if err != nil {
+			logger.LogWarn(ctx, fmt.Sprintf("CSV 第 %d 行%v", lineNum, err))
 			continue
 		}
-		rows = append(rows, csvPriceRow{
-			ModelID: strings.TrimSpace(record[0]),
-			Desc:    strings.TrimSpace(record[2]),
-			Price:   price,
-			Unit:    strings.TrimSpace(record[4]),
-		})
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+// parseXLSXRows 解析 Excel(.xlsx) 第一个工作表的全部数据行，首行为表头。
+// 必需列（模型ID/说明/标价/单位）按表头名称定位，允许存在其他附加列。
+func parseXLSXRows(reader io.Reader, ctx context.Context) ([]csvPriceRow, error) {
+	f, err := excelize.OpenReader(reader)
+	if err != nil {
+		return nil, fmt.Errorf("读取 Excel 文件失败: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	sheets := f.GetSheetList()
+	if len(sheets) == 0 {
+		return nil, fmt.Errorf("Excel 文件中没有工作表")
+	}
+	records, err := f.GetRows(sheets[0])
+	if err != nil {
+		return nil, fmt.Errorf("读取 Excel 工作表失败: %w", err)
+	}
+	if len(records) == 0 {
+		return nil, fmt.Errorf("Excel 文件为空")
+	}
+	cols, err := locatePriceColumns(records[0])
+	if err != nil {
+		return nil, err
+	}
+
+	var rows []csvPriceRow
+	for i, record := range records[1:] {
+		row, err := extractPriceRow(record, cols)
+		if errors.Is(err, errRecordTooShort) {
+			continue
+		}
+		if err != nil {
+			logger.LogWarn(ctx, fmt.Sprintf("Excel 第 %d 行%v", i+2, err))
+			continue
+		}
+		rows = append(rows, row)
 	}
 	return rows, nil
 }
@@ -289,11 +540,27 @@ func tierNames(n int) []string {
 // buildTieredExpression 由按变量归类的档位价格生成完整计费表达式。
 // 无阶梯时输出简单求和；有阶梯时生成嵌套三元，末档为 else 分支。
 func buildTieredExpression(tiers map[string][]priceTier) string {
+	return buildTieredExpressionNamed(tiers, "")
+}
+
+// buildTieredExpressionNamed 与 buildTieredExpression 相同，但 namePrefix 非空时：
+// 无阶梯求和会包一层 tier(namePrefix, ...) 以保留时段标签；有阶梯时档位名加此前缀，
+// 用于时段分组表达式中区分各档位所属的时段。
+func buildTieredExpressionNamed(tiers map[string][]priceTier, namePrefix string) string {
 	bounds := collectTierBounds(tiers)
 	if len(bounds) == 0 {
-		return buildExprSum(tiers, 0)
+		sum := buildExprSum(tiers, 0)
+		if namePrefix != "" {
+			return fmt.Sprintf("tier(%q, %s)", namePrefix, sum)
+		}
+		return sum
 	}
 	names := tierNames(len(bounds))
+	if namePrefix != "" {
+		for i := range names {
+			names[i] = namePrefix + " " + names[i]
+		}
+	}
 	last := len(bounds) - 1
 	expr := fmt.Sprintf("tier(%q, %s)", names[last], buildExprSum(tiers, bounds[last]))
 	for i := last - 1; i >= 0; i-- {
@@ -339,9 +606,64 @@ func buildExprDisplayLines(tiers map[string][]priceTier) []displayPriceLine {
 	return lines
 }
 
-// buildTokenPricing 处理 token 类模型：简单模型出倍率，阶梯/多模态/含 cc1h 模型出表达式
+// periodGroup 同一时段条件下按变量归类的档位价格；period 为 nil 表示无时段条件的默认组
+type periodGroup struct {
+	period *timePeriodCond
+	tiers  map[string][]priceTier
+}
+
+// buildTimeSlicedExpression 由时段分组生成时间条件嵌套三元表达式。
+// 兜底（else）分支：存在默认组（无时段条件）时为默认组，否则为最后出现的时段组（如谷时）。
+func buildTimeSlicedExpression(groups []*periodGroup) string {
+	fallbackIdx := len(groups) - 1
+	for i, g := range groups {
+		if g.period == nil {
+			fallbackIdx = i
+			break
+		}
+	}
+	body := func(g *periodGroup) string {
+		if g.period == nil {
+			return buildTieredExpression(g.tiers)
+		}
+		return buildTieredExpressionNamed(g.tiers, g.period.Label)
+	}
+	expr := body(groups[fallbackIdx])
+	for i := len(groups) - 1; i >= 0; i-- {
+		if i == fallbackIdx {
+			continue
+		}
+		thenBody := body(groups[i])
+		if strings.Contains(thenBody, " ? ") {
+			thenBody = "(" + thenBody + ")"
+		}
+		expr = fmt.Sprintf("%s ? %s : (%s)", groups[i].period.exprCondition(), thenBody, expr)
+	}
+	return expr
+}
+
+// buildPeriodDisplayLines 为多时段分组生成可读价格行，时段组的价格行标签带时段后缀，
+// 如 {label: "Input price (峰时)", value: "3 元/M"}
+func buildPeriodDisplayLines(groups []*periodGroup) []displayPriceLine {
+	var lines []displayPriceLine
+	for _, g := range groups {
+		for _, l := range buildExprDisplayLines(g.tiers) {
+			if g.period != nil {
+				l.Label = fmt.Sprintf("%s (%s)", l.Label, g.period.Label)
+			}
+			lines = append(lines, l)
+		}
+	}
+	return lines
+}
+
+// buildTokenPricing 处理 token 类模型：简单模型出倍率，阶梯/多模态/含 cc1h 模型出表达式，
+// 含峰谷时段条件的模型出时间条件嵌套三元表达式
 func buildTokenPricing(modelID string, rows []csvPriceRow, result *csvConvertResult, ctx context.Context) {
-	tiers := make(map[string][]priceTier)
+	var groups []*periodGroup
+	groupByLabel := make(map[string]*periodGroup)
+	var defaultGroup *periodGroup
+
 	for _, r := range rows {
 		typ, cond := parseDesc(r.Desc)
 		if csvDescTypeSkip[typ] {
@@ -353,16 +675,50 @@ func buildTokenPricing(modelID string, rows []csvPriceRow, result *csvConvertRes
 			continue
 		}
 		bound := parseTierUpperBound(cond)
-		tiers[varName] = append(tiers[varName], priceTier{UpperBound: bound, Price: r.Price})
+		// 时段与长度阶梯可能同时出现在条件中，先剥离阶梯部分再解析时段
+		period, err := parseTimePeriodCondition(tierBoundRegex.ReplaceAllString(cond, ""))
+		if err != nil {
+			logger.LogWarn(ctx, fmt.Sprintf("模型 %s 时段条件无效，已跳过 %q: %v", modelID, r.Desc, err))
+			continue
+		}
+		var g *periodGroup
+		if period == nil {
+			if defaultGroup == nil {
+				defaultGroup = &periodGroup{tiers: make(map[string][]priceTier)}
+				groups = append(groups, defaultGroup)
+			}
+			g = defaultGroup
+		} else {
+			g = groupByLabel[period.Label]
+			if g != nil {
+				if !sameTimePeriod(g.period, period) {
+					logger.LogWarn(ctx, fmt.Sprintf("模型 %s 时段标签 %q 的时间范围不一致，已跳过 %q", modelID, period.Label, r.Desc))
+					continue
+				}
+			} else {
+				g = &periodGroup{period: period, tiers: make(map[string][]priceTier)}
+				groupByLabel[period.Label] = g
+				groups = append(groups, g)
+			}
+		}
+		g.tiers[varName] = append(g.tiers[varName], priceTier{UpperBound: bound, Price: r.Price})
 	}
 
-	if len(tiers) == 0 {
+	if len(groups) == 0 {
 		return
 	}
 
 	// 统一走直接单价表达式：p*输入价 + c*输出价 + cr*缓存价 + cc*写缓存价
 	// 表达式系数即 CSV 人民币价格，不再走 model_ratio/completion_ratio 倍率换算
-	expr := buildTieredExpression(tiers)
+	var expr string
+	var displayLines []displayPriceLine
+	if len(groups) == 1 && groups[0].period == nil {
+		expr = buildTieredExpression(groups[0].tiers)
+		displayLines = buildExprDisplayLines(groups[0].tiers)
+	} else {
+		expr = buildTimeSlicedExpression(groups)
+		displayLines = buildPeriodDisplayLines(groups)
+	}
 	if _, err := billingexpr.CompileFromCache(expr); err != nil {
 		logger.LogWarn(ctx, fmt.Sprintf("模型 %s 表达式编译失败，已跳过: %v", modelID, err))
 		return
@@ -374,7 +730,7 @@ func buildTokenPricing(modelID string, rows []csvPriceRow, result *csvConvertRes
 	result.billingModes[modelID] = billing_setting.BillingModeTieredExpr
 	result.billingExprs[modelID] = expr
 	result.setDisplayPrice(modelID, "billing_mode", "Expression billing")
-	result.setDisplayPrice(modelID, "billing_expr", buildExprDisplayLines(tiers))
+	result.setDisplayPrice(modelID, "billing_expr", displayLines)
 }
 
 // selectRepresentativePrice 代表价选择：默认档优先，无默认取最高价（保守防亏损）
@@ -433,16 +789,21 @@ func buildModelPricing(modelID string, rows []csvPriceRow, result *csvConvertRes
 	}
 }
 
-// convertCSVToRatioData 将 CSV 内容转换为同步数据格式，仅保留 localModels 中存在的模型。
-// 返回的 map key 与 pricingSyncFields 对齐，可直接交给 buildDifferences 复用；
-// 同时返回每个模型各字段的可读价格展示内容，供差异对比界面展示。
+// convertCSVToRatioData 将 CSV 内容转换为同步数据格式，仅保留 localModels 中存在的模型
 func convertCSVToRatioData(reader io.Reader, localModels map[string]bool, ctx context.Context) (map[string]any, map[string]map[string]any, []string, error) {
 	rows, err := parseCSVRows(reader, ctx)
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	return convertRowsToRatioData(rows, localModels, ctx)
+}
+
+// convertRowsToRatioData 将解析出的价格行转换为同步数据格式，仅保留 localModels 中存在的模型。
+// 返回的 map key 与 pricingSyncFields 对齐，可直接交给 buildDifferences 复用；
+// 同时返回每个模型各字段的可读价格展示内容，供差异对比界面展示。
+func convertRowsToRatioData(rows []csvPriceRow, localModels map[string]bool, ctx context.Context) (map[string]any, map[string]map[string]any, []string, error) {
 	if len(rows) == 0 {
-		return nil, nil, nil, fmt.Errorf("CSV 中无有效数据行")
+		return nil, nil, nil, fmt.Errorf("文件中无有效数据行")
 	}
 
 	modelRows := make(map[string][]csvPriceRow)
@@ -478,19 +839,22 @@ func convertCSVToRatioData(reader io.Reader, localModels map[string]bool, ctx co
 	return converted, result.displayPrices, skippedModels, nil
 }
 
-// FetchCSVUpstreamRatios 接收上传的 CSV 文件，解析后复用差异对比流程返回结果
+// FetchCSVUpstreamRatios 接收上传的 CSV/Excel 文件，解析后复用差异对比流程返回结果
 func FetchCSVUpstreamRatios(c *gin.Context) {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "请选择要上传的 CSV 文件"})
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "请选择要上传的 CSV 或 Excel 文件"})
 		return
 	}
 	if fileHeader.Size > maxCSVFileSize {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "CSV 文件大小不能超过 10MB"})
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "文件大小不能超过 10MB"})
 		return
 	}
-	if !strings.HasSuffix(strings.ToLower(fileHeader.Filename), ".csv") {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "仅支持 .csv 文件"})
+	filename := strings.ToLower(fileHeader.Filename)
+	isCSV := strings.HasSuffix(filename, ".csv")
+	isXLSX := strings.HasSuffix(filename, ".xlsx")
+	if !isCSV && !isXLSX {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "仅支持 .csv 或 .xlsx 文件"})
 		return
 	}
 
@@ -528,9 +892,20 @@ func FetchCSVUpstreamRatios(c *gin.Context) {
 		}
 	}
 
-	converted, displayPrices, skippedModels, err := convertCSVToRatioData(file, localModels, c.Request.Context())
+	var rows []csvPriceRow
+	if isXLSX {
+		rows, err = parseXLSXRows(file, c.Request.Context())
+	} else {
+		rows, err = parseCSVRows(file, c.Request.Context())
+	}
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "CSV 解析失败: " + err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "文件解析失败: " + err.Error()})
+		return
+	}
+
+	converted, displayPrices, skippedModels, err := convertRowsToRatioData(rows, localModels, c.Request.Context())
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"success": false, "message": "文件解析失败: " + err.Error()})
 		return
 	}
 
@@ -540,7 +915,7 @@ func FetchCSVUpstreamRatios(c *gin.Context) {
 	}{{name: csvImportChannelName, data: converted}}
 	differences := buildDifferences(localData, successfulChannels)
 
-	logger.LogInfo(c.Request.Context(), fmt.Sprintf("CSV 定价导入解析完成: 跳过 %d 个渠道中不存在的模型", len(skippedModels)))
+	logger.LogInfo(c.Request.Context(), fmt.Sprintf("定价文件导入解析完成: 跳过 %d 个渠道中不存在的模型", len(skippedModels)))
 
 	c.JSON(http.StatusOK, gin.H{
 		"success": true,
