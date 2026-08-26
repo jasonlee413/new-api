@@ -131,12 +131,16 @@ func OaiResponsesStreamHandler(c *gin.Context, info *relaycommon.RelayInfo, resp
 				imageCounter.Commit(info)
 				imageCommitted = true
 			}
+			// Responses 流以终止事件结束，上游不会发送 [DONE]；
+			// 收到即视为正常结束，避免客户端在事件后断开被误判为 client_gone
+			sr.Done()
 		case "response.failed", "response.incomplete", "response.cancelled", "response.canceled":
 			if !imageCommitted {
 				imageCounter.Reset()
 				imageCounter.Commit(info)
 				imageCommitted = true
 			}
+			sr.Done()
 		case "response.output_text.delta":
 			// 处理输出文本
 			responseTextBuilder.WriteString(streamResponse.Delta)
