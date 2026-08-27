@@ -168,6 +168,23 @@ export function buildBaseParams(config: {
 }
 
 /**
+ * Convert a model or username log filter into a fuzzy LIKE pattern.
+ * The backend treats values containing % as SQL LIKE patterns (at most 2
+ * wildcards, keyword length >= 2 bytes after stripping %), otherwise as an
+ * exact match. Keep user-provided wildcards untouched and fall back to
+ * exact match for inputs too short for backend fuzzy validation.
+ */
+function toFuzzyLogPattern(value: string): string {
+  if (value.includes('%')) {
+    return value
+  }
+  if (new TextEncoder().encode(value).length < 2) {
+    return value
+  }
+  return `%${value}%`
+}
+
+/**
  * Build API params from search params and column filters (for common logs)
  */
 export function buildApiParams(config: {
@@ -200,14 +217,16 @@ export function buildApiParams(config: {
     p: page,
     page_size: pageSize,
     ...(searchParams.type ? { type: processType(searchParams.type) } : {}),
-    ...(searchParams.model ? { model_name: String(searchParams.model) } : {}),
+    ...(searchParams.model
+      ? { model_name: toFuzzyLogPattern(String(searchParams.model)) }
+      : {}),
     ...(searchParams.token ? { token_name: String(searchParams.token) } : {}),
     ...(searchParams.group ? { group: String(searchParams.group) } : {}),
     ...(isAdmin && searchParams.channel
       ? { channel: Number(searchParams.channel) || 0 }
       : {}),
     ...(isAdmin && searchParams.username
-      ? { username: String(searchParams.username) }
+      ? { username: toFuzzyLogPattern(String(searchParams.username)) }
       : {}),
     ...(searchParams.requestId
       ? { request_id: String(searchParams.requestId) }
@@ -228,7 +247,7 @@ export function buildApiParams(config: {
           params.type = processType(value)
           break
         case 'model_name':
-          params.model_name = String(value)
+          params.model_name = toFuzzyLogPattern(String(value))
           break
         case 'token_name':
           params.token_name = String(value)
@@ -240,7 +259,7 @@ export function buildApiParams(config: {
           if (isAdmin) params.channel = Number(value) || 0
           break
         case 'username':
-          if (isAdmin) params.username = String(value)
+          if (isAdmin) params.username = toFuzzyLogPattern(String(value))
           break
       }
     })
