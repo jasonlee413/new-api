@@ -97,7 +97,7 @@ function formatTokenHint(value: string | number): string {
   return String(n)
 }
 
-function formatConditionSummary(
+export function formatConditionSummary(
   conditions: TierCondition[],
   t: (key: string) => string
 ): string {
@@ -111,7 +111,7 @@ function formatConditionSummary(
     .join(' && ')
 }
 
-function formatTimeSummary(
+export function formatTimeSummary(
   tier: ParsedTier,
   t: (key: string) => string
 ): string {

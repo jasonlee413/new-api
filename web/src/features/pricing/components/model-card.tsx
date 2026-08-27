@@ -27,8 +27,13 @@ import { cn } from '@/lib/utils'
 import { DEFAULT_TOKEN_UNIT } from '../constants'
 import {
   getDynamicDisplayGroupRatio,
+  getDynamicPriceEntries,
   getDynamicPricingSummary,
 } from '../lib/dynamic-price'
+import {
+  formatConditionSummary,
+  formatTimeSummary,
+} from './dynamic-pricing-breakdown'
 import { parseTags } from '../lib/filters'
 import { isTokenBasedModel } from '../lib/model-helpers'
 import { formatPrice, formatRequestPrice } from '../lib/price'
@@ -66,17 +71,18 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
     props.model.billing_mode === 'tiered_expr' &&
     Boolean(props.model.billing_expr)
   const hasCachedPrice = isTokenBased && props.model.cache_ratio != null
+  const dynamicOptions = {
+    tokenUnit,
+    showRechargePrice,
+    priceRate,
+    usdExchangeRate,
+    groupRatioMultiplier: getDynamicDisplayGroupRatio(
+      props.model,
+      props.selectedGroup
+    ),
+  }
   const dynamicSummary = isDynamicPricing
-    ? getDynamicPricingSummary(props.model, {
-        tokenUnit,
-        showRechargePrice,
-        priceRate,
-        usdExchangeRate,
-        groupRatioMultiplier: getDynamicDisplayGroupRatio(
-          props.model,
-          props.selectedGroup
-        ),
-      })
+    ? getDynamicPricingSummary(props.model, dynamicOptions)
     : null
 
   const primaryGroup = groups[0]
@@ -92,6 +98,7 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
   }
 
   let priceSummary: ReactNode
+  let dynamicPriceDetails: ReactNode = null
   if (dynamicSummary) {
     if (dynamicSummary.isSpecialExpression) {
       priceSummary = (
@@ -104,7 +111,10 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
           </code>
         </span>
       )
-    } else if (dynamicSummary.primaryEntries.length > 0) {
+    } else if (dynamicSummary.entries.length > 0) {
+      const cacheReadEntry = dynamicSummary.entries.find(
+        (entry) => entry.field === 'cacheReadPrice'
+      )
       priceSummary = (
         <>
           {dynamicSummary.primaryEntries.map((entry) => (
@@ -118,8 +128,87 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
               </span>
             </span>
           ))}
+          {cacheReadEntry && (
+            <span className='text-muted-foreground whitespace-nowrap'>
+              {t('Cached')}{' '}
+              <span className='text-foreground font-mono font-semibold'>
+                {cacheReadEntry.formatted}
+              </span>
+            </span>
+          )}
         </>
       )
+
+      const rulesHint = dynamicSummary.hasRequestRules ? (
+        <span className='text-muted-foreground/60 text-[11px]'>
+          {t('Conditional multipliers')}
+        </span>
+      ) : null
+
+      const detailEntries = dynamicSummary.secondaryEntries.filter(
+        (entry) => entry.field !== 'cacheReadPrice'
+      )
+
+      if (dynamicSummary.tierCount > 1) {
+        dynamicPriceDetails = (
+          <div className='space-y-1.5 text-sm'>
+            {dynamicSummary.tiers.map((tier, tierIndex) => {
+              const tierEntries = getDynamicPriceEntries(tier, dynamicOptions)
+              if (tierEntries.length === 0) return null
+              const condSummary = formatConditionSummary(tier.conditions, t)
+              const timeSummary = formatTimeSummary(tier, t)
+              return (
+                <div
+                  key={`card-tier-${tierIndex}`}
+                  className='flex flex-wrap items-baseline gap-x-2 gap-y-0.5'
+                >
+                  <span className='inline-flex items-baseline gap-1'>
+                    <span className='rounded bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-500/20 dark:text-blue-300'>
+                      {tier.label || t('Default')}
+                    </span>
+                    {(condSummary || timeSummary) && (
+                      <span className='text-muted-foreground/70 text-[11px]'>
+                        {[condSummary, timeSummary]
+                          .filter(Boolean)
+                          .join(' · ')}
+                      </span>
+                    )}
+                  </span>
+                  {tierEntries.map((entry) => (
+                    <span
+                      key={entry.key}
+                      className='text-muted-foreground whitespace-nowrap'
+                    >
+                      {t(entry.shortLabel)}{' '}
+                      <span className='text-foreground font-mono font-semibold'>
+                        {entry.formatted}
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              )
+            })}
+            {rulesHint}
+          </div>
+        )
+      } else if (detailEntries.length > 0 || rulesHint) {
+        dynamicPriceDetails = (
+          <div className='flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm'>
+            {detailEntries.map((entry) => (
+              <span
+                key={entry.key}
+                className='text-muted-foreground whitespace-nowrap'
+              >
+                {t(entry.shortLabel)}{' '}
+                <span className='text-foreground font-mono font-semibold'>
+                  {entry.formatted}
+                </span>
+              </span>
+            ))}
+            {rulesHint}
+          </div>
+        )
+      }
     } else {
       priceSummary = (
         <span className='text-muted-foreground text-sm'>
@@ -240,10 +329,15 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
         </div>
       </div>
 
-      {/* Description */}
-      <p className='text-muted-foreground mt-2 line-clamp-1 flex-1 text-[13px] leading-relaxed sm:mt-4 sm:line-clamp-2 sm:min-h-[2.5rem]'>
-        {props.model.description || t('No description available.')}
-      </p>
+      {/* Middle: dynamic pricing details + description */}
+      <div className='mt-2 flex-1 space-y-2 sm:mt-4'>
+        {dynamicPriceDetails}
+        {(props.model.description || !dynamicPriceDetails) && (
+          <p className='text-muted-foreground line-clamp-1 text-[13px] leading-relaxed sm:line-clamp-2 sm:min-h-[2.5rem]'>
+            {props.model.description || ' '}
+          </p>
+        )}
+      </div>
 
       {/* Footer: left metadata and right performance summary share row alignment */}
       <div className='mt-2 grid grid-cols-[minmax(0,1fr)_auto] items-start gap-x-2 gap-y-1 sm:mt-4'>
