@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func parseFlowQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
+func parseQuotaTimeRange(c *gin.Context) (int64, int64, bool) {
 	startTimestamp, err := strconv.ParseInt(c.Query("start_timestamp"), 10, 64)
 	if err != nil || startTimestamp <= 0 {
 		common.ApiErrorMsg(c, "invalid start_timestamp")
@@ -89,7 +89,7 @@ func GetUserQuotaDates(c *gin.Context) {
 }
 
 func GetAllFlowQuotaDates(c *gin.Context) {
-	startTimestamp, endTimestamp, ok := parseFlowQuotaTimeRange(c)
+	startTimestamp, endTimestamp, ok := parseQuotaTimeRange(c)
 	if !ok {
 		return
 	}
@@ -110,7 +110,7 @@ func GetAllFlowQuotaDates(c *gin.Context) {
 
 func GetUserFlowQuotaDates(c *gin.Context) {
 	userId := c.GetInt("id")
-	startTimestamp, endTimestamp, ok := parseFlowQuotaTimeRange(c)
+	startTimestamp, endTimestamp, ok := parseQuotaTimeRange(c)
 	if !ok {
 		return
 	}
@@ -242,6 +242,93 @@ func GetQuotaTokenOptions(c *gin.Context) {
 		"success": true,
 		"message": "",
 		"data":    options,
+	})
+}
+
+// parseTokenModelQuotaParams validates the shared query params of the
+// per-token model drill-down endpoints: token_id plus a valid time range.
+func parseTokenModelQuotaParams(c *gin.Context) (int, int64, int64, bool) {
+	tokenId, err := strconv.Atoi(c.Query("token_id"))
+	if err != nil || tokenId <= 0 {
+		common.ApiErrorMsg(c, "invalid token_id")
+		return 0, 0, 0, false
+	}
+	startTimestamp, endTimestamp, ok := parseQuotaTimeRange(c)
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return tokenId, startTimestamp, endTimestamp, true
+}
+
+// GetUserModelQuotaData returns per-model quota aggregation of a single user
+// (matched by the username snapshot stored in quota_data) for admins, powering
+// the dashboard user drill-down view.
+func GetUserModelQuotaData(c *gin.Context) {
+	username := strings.TrimSpace(c.Query("username"))
+	if username == "" {
+		common.ApiErrorMsg(c, "invalid username")
+		return
+	}
+	startTimestamp, endTimestamp, ok := parseQuotaTimeRange(c)
+	if !ok {
+		return
+	}
+	dates, err := model.GetUserQuotaDataGroupByModel(username, startTimestamp, endTimestamp)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    dates,
+	})
+}
+
+// GetTokenModelQuotaData returns per-model quota aggregation of a single token
+// for admins, powering the dashboard key drill-down view.
+func GetTokenModelQuotaData(c *gin.Context) {
+	tokenId, startTimestamp, endTimestamp, ok := parseTokenModelQuotaParams(c)
+	if !ok {
+		return
+	}
+	dates, err := model.GetQuotaDataGroupByModel(tokenId, 0, startTimestamp, endTimestamp)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    dates,
+	})
+}
+
+// GetUserTokenModelQuotaData returns per-model quota aggregation of a single
+// token restricted to the authenticated user. The user_id filter keeps other
+// users' keys unreadable: a foreign token_id simply yields an empty result.
+func GetUserTokenModelQuotaData(c *gin.Context) {
+	userId := c.GetInt("id")
+	tokenId, startTimestamp, endTimestamp, ok := parseTokenModelQuotaParams(c)
+	if !ok {
+		return
+	}
+	if endTimestamp-startTimestamp > 2592000 {
+		c.JSON(http.StatusOK, gin.H{
+			"success": false,
+			"message": "时间跨度不能超过 1 个月",
+		})
+		return
+	}
+	dates, err := model.GetQuotaDataGroupByModel(tokenId, userId, startTimestamp, endTimestamp)
+	if err != nil {
+		common.ApiError(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"success": true,
+		"message": "",
+		"data":    dates,
 	})
 }
 

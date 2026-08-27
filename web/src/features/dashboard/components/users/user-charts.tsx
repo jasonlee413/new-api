@@ -18,7 +18,8 @@ For commercial licensing, please contact support@quantumnous.com
 */
 import { useQuery } from '@tanstack/react-query'
 import { VChart } from '@visactor/react-vchart'
-import { Users, Loader2 } from 'lucide-react'
+import type { EventParamsDefinition } from '@visactor/vchart'
+import { Users, Loader2, MousePointerClick } from 'lucide-react'
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { useTranslation } from 'react-i18next'
 
@@ -40,6 +41,8 @@ import type {
   ProcessedUserChartData,
   UserChartsFilters,
 } from '@/features/dashboard/types'
+
+import { UserModelDialog } from './user-model-dialog'
 import { getRollingDateRange, type TimeGranularity } from '@/lib/time'
 import { VCHART_OPTION } from '@/lib/vchart'
 
@@ -65,6 +68,25 @@ const USER_CHARTS: {
 ]
 
 const TOP_USER_LIMIT_OPTIONS = [5, 10, 20, 50]
+
+type RankClickEvent = EventParamsDefinition['click']
+
+// Extracts the bar datum from a VChart click event (datum -> item.datum
+// fallback). Click (not pointerdown) is used so the dialog opens only after
+// mouse release; otherwise the pointerup lands on the fresh dialog overlay
+// and closes it immediately.
+function rankEventDatum(event: RankClickEvent): Record<string, unknown> {
+  const record = event as Record<string, unknown> | null | undefined
+  if (!record) return {}
+  if (record.datum && typeof record.datum === 'object') {
+    return record.datum as Record<string, unknown>
+  }
+  const item = record.item as Record<string, unknown> | undefined
+  if (item?.datum && typeof item.datum === 'object') {
+    return item.datum as Record<string, unknown>
+  }
+  return {}
+}
 
 interface UserChartsProps {
   filters: UserChartsFilters
@@ -119,6 +141,19 @@ export function UserCharts(props: UserChartsProps) {
     },
     [onFiltersChange, props.filters]
   )
+
+  const [selectedUsername, setSelectedUsername] = useState<string | null>(null)
+
+  const handleRankClick = useCallback((event: RankClickEvent) => {
+    const datum = rankEventDatum(event)
+    const username = String(datum.User ?? '')
+    if (!username) return
+    setSelectedUsername(username)
+  }, [])
+
+  const handleDialogOpenChange = useCallback((open: boolean) => {
+    if (!open) setSelectedUsername(null)
+  }, [])
 
   useEffect(() => {
     const updateTheme = async () => {
@@ -235,6 +270,12 @@ export function UserCharts(props: UserChartsProps) {
                   <Users />
                 </IconBadge>
                 <div className='text-sm font-semibold'>{t(chart.labelKey)}</div>
+                {chart.value === 'rank' && (
+                  <span className='text-muted-foreground ml-auto flex items-center gap-1 text-xs'>
+                    <MousePointerClick className='size-3.5' />
+                    {t('Click a bar to view model breakdown')}
+                  </span>
+                )}
               </div>
 
               <div className='h-[300px] p-1.5 sm:h-96 sm:p-2'>
@@ -251,6 +292,9 @@ export function UserCharts(props: UserChartsProps) {
                         background: 'transparent',
                       }}
                       option={VCHART_OPTION}
+                      onClick={
+                        chart.value === 'rank' ? handleRankClick : undefined
+                      }
                     />
                   )
                 )}
@@ -259,6 +303,13 @@ export function UserCharts(props: UserChartsProps) {
           )
         })}
       </div>
+
+      <UserModelDialog
+        open={selectedUsername !== null}
+        onOpenChange={handleDialogOpenChange}
+        username={selectedUsername}
+        timeRange={timeRange}
+      />
     </div>
   )
 }

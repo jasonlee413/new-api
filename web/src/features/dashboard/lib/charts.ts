@@ -1013,6 +1013,7 @@ export function processUserChartData(
       },
       legends: { visible: false },
       bar: {
+        style: { cursor: 'pointer' },
         state: { hover: { stroke: '#000', lineWidth: 1 } },
       },
       label: {
@@ -1139,7 +1140,7 @@ export function processUserChartData(
   }
 }
 
-const TOKEN_COLORS = [
+export const TOKEN_COLORS = [
   '#5B8FF9',
   '#5AD8A6',
   '#F6BD16',
@@ -1226,6 +1227,15 @@ export function processTokenChartData(
     tokenQuotaTotal.set(label, prev + (Number(item.quota) || 0))
   })
 
+  // Reverse map: label -> token_id, so a clicked bar can be traced back to
+  // the key it represents (first token wins when names collide).
+  const tokenIdByLabel = new Map<string, number>()
+  tokenLabelMap.forEach((label, tokenId) => {
+    if (!tokenIdByLabel.has(label)) {
+      tokenIdByLabel.set(label, tokenId)
+    }
+  })
+
   const sorted = Array.from(tokenQuotaTotal.entries()).sort(
     (a, b) => b[1] - a[1]
   )
@@ -1235,6 +1245,7 @@ export function processTokenChartData(
 
   const rankValues = sorted.slice(0, limit).map(([token, quota]) => ({
     Token: token,
+    tokenId: tokenIdByLabel.get(token) ?? 0,
     rawQuota: quota,
     Usage: Number((quota / quotaPerUnit).toFixed(4)),
   }))
@@ -1296,6 +1307,7 @@ export function processTokenChartData(
       },
       legends: { visible: false },
       bar: {
+        style: { cursor: 'pointer' },
         state: { hover: { stroke: '#000', lineWidth: 1 } },
       },
       label: {

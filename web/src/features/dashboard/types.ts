@@ -44,6 +44,14 @@ export interface TokenQuotaDataItem {
   token_used?: number
 }
 
+// Per-model quota aggregation for drill-down views (by key or by user)
+export interface ModelQuotaItem {
+  model_name: string
+  count?: number
+  quota?: number
+  token_used?: number
+}
+
 export interface FlowQuotaDataItem {
   user_id?: number
   username?: string

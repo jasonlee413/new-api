@@ -279,6 +279,53 @@ func GetQuotaDataByUserToken(userId int, startTime int64, endTime int64) ([]*Tok
 	return rows, fillTokenNames(rows)
 }
 
+// ModelQuotaData is the result shape for per-model quota aggregation of a
+// single token, used by the dashboard key drill-down view.
+type ModelQuotaData struct {
+	ModelName string `json:"model_name"`
+	Count     int    `json:"count"`
+	Quota     int    `json:"quota"`
+	TokenUsed int    `json:"token_used"`
+}
+
+// GetQuotaDataGroupByModel aggregates quota data by model for a single token
+// within a time range. When userId > 0 the query is additionally restricted to
+// that user, which keeps non-admin callers from reading other users' keys.
+func GetQuotaDataGroupByModel(tokenId int, userId int, startTime int64, endTime int64) ([]*ModelQuotaData, error) {
+	var rows []*ModelQuotaData
+	query := DB.Table("quota_data").
+		Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
+		Where("token_id = ? and created_at >= ? and created_at <= ?", tokenId, startTime, endTime)
+	if userId > 0 {
+		query = query.Where("user_id = ?", userId)
+	}
+	err := query.
+		Group("model_name").
+		Order("quota DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+// GetUserQuotaDataGroupByModel aggregates quota data by model for a single
+// user (matched by the username snapshot) within a time range, powering the
+// dashboard user drill-down view.
+func GetUserQuotaDataGroupByModel(username string, startTime int64, endTime int64) ([]*ModelQuotaData, error) {
+	var rows []*ModelQuotaData
+	err := DB.Table("quota_data").
+		Select("model_name, sum(count) as count, sum(quota) as quota, sum(token_used) as token_used").
+		Where("username = ? and created_at >= ? and created_at <= ?", username, startTime, endTime).
+		Group("model_name").
+		Order("quota DESC").
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
 // fillTokenNames batch-loads token names from the tokens table and assigns them
 // to TokenQuotaData rows. Deleted tokens leave TokenName empty so the frontend
 // can render a localized "deleted" label.

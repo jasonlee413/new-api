@@ -20,6 +20,7 @@ import { api } from '@/lib/api'
 
 import type {
   FlowQuotaDataItem,
+  ModelQuotaItem,
   QuotaDataItem,
   TokenFilterOption,
   TokenQuotaDataItem,
@@ -149,6 +150,43 @@ export async function getUserTokenQuotaData(params: {
     '/api/data/tokens/self',
     { params }
   )
+  return res.data
+}
+
+// Per-model quota breakdown of a single token (key drill-down view).
+// Admins use the admin endpoint; normal users the self endpoint which is
+// restricted to their own tokens server-side.
+export async function getTokenModelQuotaData(
+  params: {
+    token_id: number
+    start_timestamp: number
+    end_timestamp: number
+  },
+  isAdmin = false
+) {
+  const endpoint = isAdmin
+    ? '/api/data/tokens/models'
+    : '/api/data/tokens/self/models'
+  const res = await api.get<{
+    success: boolean
+    data?: ModelQuotaItem[]
+    message?: string
+  }>(endpoint, { params })
+  return res.data
+}
+
+// Admin: per-model quota breakdown of a single user, aggregated across all of
+// the user's keys (user drill-down view).
+export async function getUserModelQuotaData(params: {
+  username: string
+  start_timestamp: number
+  end_timestamp: number
+}) {
+  const res = await api.get<{
+    success: boolean
+    data?: ModelQuotaItem[]
+    message?: string
+  }>('/api/data/users/models', { params })
   return res.data
 }
 
