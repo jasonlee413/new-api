@@ -594,9 +594,8 @@ func TestBuildTokenPricing(t *testing.T) {
 		assert.Equal(t, "p*2 + c*8", result.billingExprs["bad-period-model"])
 	})
 
-	t.Run("组合条件折叠进长度档位取最高价", func(t *testing.T) {
-		// service_tier=Priority 等组合条件无法按段计费：
-		// 折叠进可解析的输入长度档位，同档位取最高价，与行序无关
+	t.Run("组合条件行默认跳过不读取价格", func(t *testing.T) {
+		// service_tier=Priority 等组合条件无法按段计费：默认跳过该行，不读取其价格
 		rows := []csvPriceRow{
 			{Desc: "输入 - 输入长度(0, 272K] 且 service_tier=Priority", Price: 4, Unit: "百万 Token"},
 			{Desc: "输入 - 输入长度(0, 272K]", Price: 2, Unit: "百万 Token"},
@@ -608,40 +607,33 @@ func TestBuildTokenPricing(t *testing.T) {
 		result := newCSVConvertResult()
 		buildTokenPricing("combo-tier-model", rows, 1, result, ctx)
 		assert.Equal(t, "tiered_expr", result.billingModes["combo-tier-model"])
-		expected := `len <= 272000 ? tier("standard", p*4 + c*16) : (tier("long_context", p*8 + c*48))`
+		expected := `len <= 272000 ? tier("standard", p*2 + c*16) : (tier("long_context", p*6 + c*48))`
 		assert.Equal(t, expected, result.billingExprs["combo-tier-model"])
 		require.Len(t, result.skipReasons["combo-tier-model"], 2)
-		assert.Contains(t, result.skipReasons["combo-tier-model"][0], "highest_tier_fallback")
+		assert.Contains(t, result.skipReasons["combo-tier-model"][0], "unsupported_condition")
 	})
 
-	t.Run("组合条件无档位折叠进默认档取最高价", func(t *testing.T) {
-		// 视频类 service_tier/generate_audio 组合条件：无输入长度档位，
-		// 全部折叠进默认档取最高价（统一按最高档计费）
+	t.Run("组合条件为唯一价格行时无产出", func(t *testing.T) {
+		// service_tier/generate_audio、输入长度×输出长度矩阵等组合条件行
+		// 全部跳过后，模型不产出任何计费规则
 		rows := []csvPriceRow{
 			{Desc: "输入 - service_tier=flex 且 generate_audio=false", Price: 0.5, Unit: "百万 Token"},
 			{Desc: "输入 - service_tier=default 且 generate_audio=false", Price: 1, Unit: "百万 Token"},
 			{Desc: "视频输出 - service_tier=default 且 generate_audio=true", Price: 3, Unit: "百万 Token"},
 			{Desc: "视频输出 - service_tier=default 且 generate_audio=false", Price: 2, Unit: "百万 Token"},
-		}
-		result := newCSVConvertResult()
-		buildTokenPricing("video-combo-model", rows, 1, result, ctx)
-		assert.Equal(t, "tiered_expr", result.billingModes["video-combo-model"])
-		assert.Equal(t, "p*1 + c*3", result.billingExprs["video-combo-model"])
-	})
-
-	t.Run("组合条件为唯一档位时按最高价出单档", func(t *testing.T) {
-		// 输入长度 × 输出长度二维定价（glm-4.6 等）：折叠后每个输入长度档位
-		// 取各输出长度变体的最高价
-		rows := []csvPriceRow{
 			{Desc: "输入 - 输入长度(0, 32K] 且 输出长度(0, 0.2K]", Price: 2, Unit: "百万 Token"},
-			{Desc: "输入 - 输入长度(0, 32K] 且 输出长度(0.2K, 20M]", Price: 3, Unit: "百万 Token"},
-			{Desc: "文本输出 - 输入长度(0, 32K] 且 输出长度(0, 0.2K]", Price: 8, Unit: "百万 Token"},
 			{Desc: "文本输出 - 输入长度(0, 32K] 且 输出长度(0.2K, 20M]", Price: 10, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("matrix-model", rows, 1, result, ctx)
-		assert.Equal(t, "tiered_expr", result.billingModes["matrix-model"])
-		assert.Equal(t, `tier("tier_1", p*3 + c*10)`, result.billingExprs["matrix-model"])
+		buildTokenPricing("combo-only-model", rows, 1, result, ctx)
+		_, hasExpr := result.billingExprs["combo-only-model"]
+		assert.False(t, hasExpr)
+		_, hasMode := result.billingModes["combo-only-model"]
+		assert.False(t, hasMode)
+		require.NotEmpty(t, result.skipReasons["combo-only-model"])
+		for _, reason := range result.skipReasons["combo-only-model"] {
+			assert.Contains(t, reason, "unsupported_condition")
+		}
 	})
 }
 
@@ -738,10 +730,10 @@ func TestConvertCSVToRatioDataEmpty(t *testing.T) {
 func TestConvertRowsToRatioDataParseIssues(t *testing.T) {
 	ctx := context.Background()
 	rows := []csvPriceRow{
-		// 全部行带组合请求条件 → 折叠按最高档计费，有产出但上报提示
+		// 全部行带组合请求条件 → 全部跳过，零产出并上报
 		{ModelID: "combined-model", Desc: "输入 - 输入长度(0, 32K] 且 输出长度(0, 0.2K]", Price: 2, Unit: "百万 Token"},
 		{ModelID: "combined-model", Desc: "文本输出 - 输入长度(0, 32K] 且 输出长度(0, 0.2K]", Price: 8, Unit: "百万 Token"},
-		// 部分行折叠 → 有产出但仍应提示
+		// 部分行跳过 → 有产出但仍应提示
 		{ModelID: "partial-model", Desc: "输入 - 默认", Price: 1, Unit: "百万 Token"},
 		{ModelID: "partial-model", Desc: "缓存 - 1080p 且 duration=6", Price: 0.1, Unit: "百万 Token"},
 		// 正常模型
@@ -761,19 +753,17 @@ func TestConvertRowsToRatioDataParseIssues(t *testing.T) {
 
 	combined, ok := issuesByModel["combined-model"]
 	require.True(t, ok)
-	assert.NotContains(t, combined.Reasons, "no_pricing_produced")
-	assert.Contains(t, combined.Reasons[0], "highest_tier_fallback")
-	combinedExpr, hasCombined := converted[billing_setting.BillingExprField].(map[string]string)["combined-model"]
-	require.True(t, hasCombined, "组合条件行折叠后应产出计费表达式")
-	assert.Contains(t, combinedExpr, "p*2")
-	assert.Contains(t, combinedExpr, "c*8")
+	assert.Contains(t, combined.Reasons, "no_pricing_produced")
+	assert.Contains(t, combined.Reasons[0], "unsupported_condition")
+	_, hasCombined := converted[billing_setting.BillingExprField].(map[string]string)["combined-model"]
+	assert.False(t, hasCombined, "组合条件行全跳过后不应产出计费表达式")
 
 	partial, ok := issuesByModel["partial-model"]
 	require.True(t, ok)
 	assert.NotContains(t, partial.Reasons, "no_pricing_produced")
-	assert.Contains(t, partial.Reasons[0], "highest_tier_fallback")
+	assert.Contains(t, partial.Reasons[0], "unsupported_condition")
 	partialExpr := converted[billing_setting.BillingExprField].(map[string]string)["partial-model"]
-	assert.Equal(t, "p*1 + cr*0.1", partialExpr, "组合条件行折叠进默认档")
+	assert.Equal(t, "p*1", partialExpr, "组合条件行跳过，仅保留默认档")
 
 	_, hasOk := issuesByModel["ok-model"]
 	assert.False(t, hasOk)

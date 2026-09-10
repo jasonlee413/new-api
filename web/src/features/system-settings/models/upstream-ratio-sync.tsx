@@ -127,7 +127,6 @@ function parseJsonRecord<T>(raw: string | undefined | null): Record<string, T> {
 
 // CSV 导入解析缺口原因码 → i18n 标签（后端 reason 格式为 "code: 详情"）
 const PARSE_REASON_LABELS: Record<string, string> = {
-  highest_tier_fallback: 'Charged at highest tier price',
   unsupported_condition: 'Unsupported combined condition',
   unknown_desc_type: 'Unrecognized description type',
   invalid_time_period: 'Invalid time period',

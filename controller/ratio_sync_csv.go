@@ -702,10 +702,7 @@ func (r *csvConvertResult) setDisplayPrice(modelID, field string, content any) {
 	dp[field] = content
 }
 
-// addTierPrice 记录变量某档位价格；同档位重复出现时保留最高价。
-// 组合条件行（service_tier/is_batch/输出长度/分辨率等无法按段计费的维度）折叠进
-// 可解析的输入长度档位后与标准行同档并存，取最高价即"按最高档计费"（保守防亏损），
-// 且与文件中行的先后顺序无关
+// addTierPrice 记录变量某档位价格；同档位重复出现时保留最高价，与文件中行的先后顺序无关
 func addTierPrice(tiers map[string][]priceTier, varName string, bound int64, price float64) {
 	list := tiers[varName]
 	for i := range list {
@@ -940,17 +937,11 @@ func buildTokenPricing(modelID string, rows []csvPriceRow, discount float64, res
 		bound := parseTierUpperBound(cond)
 		// 时段与长度阶梯可能同时出现在条件中，先剥离阶梯部分再解析时段
 		strippedCond := tierBoundRegex.ReplaceAllString(cond, "")
-		// "且 service_tier=Priority" 这类组合请求条件（按请求头/体/输出长度/分辨率等
-		// 区分价格）无法按段计费：折叠进可解析的输入长度档位（无档位则进默认档），
-		// 同档位取最高价（统一按最高档计费），不再整行跳过
+		// "且 service_tier=Priority"、"且 is_batch" 这类组合请求条件（按请求头/体/
+		// 输出长度/分辨率等区分价格）无法按段计费：默认跳过该行，不读取其价格
 		if strings.Contains(strippedCond, "且 ") {
-			logger.LogWarn(ctx, fmt.Sprintf("模型 %s 的组合条件无法按段计费，已按最高档价格计费 %q", modelID, r.Desc))
-			result.addSkipReason(modelID, "highest_tier_fallback: "+r.Desc)
-			if defaultGroup == nil {
-				defaultGroup = &periodGroup{tiers: make(map[string][]priceTier)}
-				groups = append(groups, defaultGroup)
-			}
-			addTierPrice(defaultGroup.tiers, varName, bound, r.Price)
+			logger.LogWarn(ctx, fmt.Sprintf("模型 %s 的组合条件无法按段计费，已跳过价格行 %q", modelID, r.Desc))
+			result.addSkipReason(modelID, "unsupported_condition: "+r.Desc)
 			continue
 		}
 		period, err := parseTimePeriodCondition(strippedCond)
