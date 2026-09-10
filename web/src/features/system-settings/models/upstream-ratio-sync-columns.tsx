@@ -51,8 +51,10 @@ const syncFieldRowMultilineClassName =
 const syncFieldLabelClassName = 'min-w-[4.5rem] shrink-0'
 
 // CSV 导入时各同步字段的可读价格标签（替换默认的倍率/表达式字段名）
+// model_ratio 现为折扣位（CSV 折扣列写入），标签展示为 Discount coefficient；
+// 不复用 Discount 键（已被充值优惠编辑器占用）
 const CSV_DISPLAY_FIELD_LABELS: Record<string, string> = {
-  model_ratio: 'Input price',
+  model_ratio: 'Discount coefficient',
   completion_ratio: 'Output price',
   cache_ratio: 'Cache read price',
   create_cache_ratio: 'Cache write price',

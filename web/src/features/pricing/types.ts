@@ -54,6 +54,8 @@ export type PricingModel = {
   billing_mode?: string
   /** Raw expression describing dynamic / tiered billing */
   billing_expr?: string
+  /** User-configured discount coefficient (e.g. 0.6 = 6折), present only when ≠ 1 */
+  discount?: number
   /** Pricing version returned by backend, useful for cache busting */
   pricing_version?: string
   /**

@@ -37,7 +37,12 @@ export async function getSystemOptions() {
 }
 
 export async function updateSystemOption(request: UpdateOptionRequest) {
-  const res = await api.put<UpdateOptionResponse>('/api/option/', request)
+  const res = await api.put<UpdateOptionResponse>('/api/option/', request, {
+    skipBusinessError: true,
+  })
+  if (res.data && res.data.success === false) {
+    throw new Error(res.data.message || 'Failed to update option')
+  }
   return res.data
 }
 

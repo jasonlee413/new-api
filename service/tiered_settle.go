@@ -7,6 +7,7 @@ import (
 	relaycommon "github.com/QuantumNous/new-api/relay/common"
 	"github.com/QuantumNous/new-api/relaykit/dto"
 	"github.com/QuantumNous/new-api/relaykit/types"
+	"github.com/QuantumNous/new-api/setting/ratio_setting"
 	"github.com/gin-gonic/gin"
 )
 
@@ -165,6 +166,10 @@ func TryTieredSettle(relayInfo *relaycommon.RelayInfo, params billingexpr.TokenP
 	if snap == nil || snap.BillingMode != "tiered_expr" {
 		return false, 0, nil
 	}
+
+	// 预扣费时 ModelRatio 固定为 1（防高估）；结算时读入用户配置的折扣系数，
+	// 未配置或命中内置默认倍率表时返回 1（无折扣）。
+	snap.ModelRatio = ratio_setting.GetTieredModelRatioDiscount(snap.ModelName)
 
 	requestInput := billingexpr.RequestInput{}
 	if relayInfo.BillingRequestInput != nil {

@@ -32,6 +32,7 @@ import { Button } from '@/components/ui/button'
 
 import {
   fetchUpstreamRatios,
+  getSystemOptions,
   getUpstreamChannels,
   updateSystemOption,
   uploadPricingCSV,
@@ -39,6 +40,7 @@ import {
 import type {
   DifferencesMap,
   DisplayPriceLine,
+  ModelParseIssue,
   RatioType,
   UpstreamChannel,
   UpstreamConfig,
@@ -123,6 +125,26 @@ function parseJsonRecord<T>(raw: string | undefined | null): Record<string, T> {
   }
 }
 
+// CSV 导入解析缺口原因码 → i18n 标签（后端 reason 格式为 "code: 详情"）
+const PARSE_REASON_LABELS: Record<string, string> = {
+  highest_tier_fallback: 'Charged at highest tier price',
+  unsupported_condition: 'Unsupported combined condition',
+  unknown_desc_type: 'Unrecognized description type',
+  invalid_time_period: 'Invalid time period',
+  time_label_mismatch: 'Inconsistent time period label',
+  expr_compile_failed: 'Expression compile failed',
+  no_pricing_produced: 'No pricing produced',
+}
+
+function parseReasonText(reason: string, t: (key: string) => string): string {
+  const sep = reason.indexOf(': ')
+  const code = sep >= 0 ? reason.slice(0, sep) : reason
+  const detail = sep >= 0 ? reason.slice(sep + 2) : ''
+  const label = PARSE_REASON_LABELS[code]
+  const head = label ? t(label) : code
+  return detail ? `${head}: ${detail}` : head
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
@@ -145,6 +167,7 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   const [conflictItems, setConflictItems] = useState<ConflictItem[]>([])
   const [confirmLoading, setConfirmLoading] = useState(false)
   const [skippedModels, setSkippedModels] = useState<string[]>([])
+  const [parseIssues, setParseIssues] = useState<ModelParseIssue[]>([])
 
   const { data: channelsData } = useQuery({
     queryKey: ['upstream-channels'],
@@ -194,6 +217,7 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
       setResolutions({})
       setDisplayPrices({})
       setSkippedModels([])
+      setParseIssues([])
 
       if (Object.keys(diffs).length === 0) {
         toast.success(t('No price differences found'))
@@ -220,17 +244,27 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         differences: diffs,
         skipped_models: skippedModels,
         display_prices: csvDisplayPrices,
+        parse_issues: parseIssues,
       } = data.data
 
       setDifferences(diffs)
       setResolutions({})
       setDisplayPrices(csvDisplayPrices ?? {})
       setSkippedModels(skippedModels ?? [])
+      setParseIssues(parseIssues ?? [])
 
       if (skippedModels && skippedModels.length > 0) {
         toast.warning(
           t('Skipped {{count}} models that are not available in any enabled channel', {
             count: skippedModels.length,
+          })
+        )
+      }
+
+      if (parseIssues && parseIssues.length > 0) {
+        toast.warning(
+          t('{{count}} models have price rows that need attention', {
+            count: parseIssues.length,
           })
         )
       }
@@ -271,7 +305,12 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   const { mutate: syncMutate, isPending: isSyncPending } = useMutation({
     mutationFn: async (updates: Array<{ key: string; value: string }>) => {
       for (const update of updates) {
-        await updateSystemOption(update)
+        try {
+          await updateSystemOption(update)
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          throw new Error(`${update.key}: ${msg}`)
+        }
       }
     },
     onSuccess: () => {
@@ -365,28 +404,35 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
     setResolutions((prev) => applyResolutionRemovalPlan(prev, plan))
   }, [])
 
-  const parsedRatios = useMemo(() => {
-    return {
-      ModelRatio: parseJsonRecord<number>(modelRatios.ModelRatio),
-      CompletionRatio: parseJsonRecord<number>(modelRatios.CompletionRatio),
-      CacheRatio: parseJsonRecord<number>(modelRatios.CacheRatio),
-      CreateCacheRatio: parseJsonRecord<number>(modelRatios.CreateCacheRatio),
-      ImageRatio: parseJsonRecord<number>(modelRatios.ImageRatio),
-      AudioRatio: parseJsonRecord<number>(modelRatios.AudioRatio),
+  const parseRatios = useCallback(
+    (get: (key: string) => string | undefined) => ({
+      ModelRatio: parseJsonRecord<number>(get('ModelRatio')),
+      CompletionRatio: parseJsonRecord<number>(get('CompletionRatio')),
+      CacheRatio: parseJsonRecord<number>(get('CacheRatio')),
+      CreateCacheRatio: parseJsonRecord<number>(get('CreateCacheRatio')),
+      ImageRatio: parseJsonRecord<number>(get('ImageRatio')),
+      AudioRatio: parseJsonRecord<number>(get('AudioRatio')),
       AudioCompletionRatio: parseJsonRecord<number>(
-        modelRatios.AudioCompletionRatio
+        get('AudioCompletionRatio')
       ),
-      ModelPrice: parseJsonRecord<number>(modelRatios.ModelPrice),
+      ModelPrice: parseJsonRecord<number>(get('ModelPrice')),
       'billing_setting.billing_mode': parseJsonRecord<string>(
-        modelRatios['billing_setting.billing_mode']
+        get('billing_setting.billing_mode')
       ),
       'billing_setting.billing_expr': parseJsonRecord<string>(
-        modelRatios['billing_setting.billing_expr']
+        get('billing_setting.billing_expr')
       ),
-    }
-  }, [modelRatios])
+    }),
+    []
+  )
 
-  type ParsedRatios = typeof parsedRatios
+  const parsedRatios = useMemo(() => {
+    return parseRatios(
+      (key) => modelRatios[key as keyof typeof modelRatios] as string
+    )
+  }, [modelRatios, parseRatios])
+
+  type ParsedRatios = ReturnType<typeof parseRatios>
 
   const getLocalBillingCategory = (
     model: string,
@@ -394,10 +440,10 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   ): 'price' | 'ratio' | 'tiered' | null => {
     if (currentRatios.ModelPrice[model] !== undefined) return 'price'
     if (
-      currentRatios['billing_setting.billing_mode']?.[model] ===
-      'tiered_expr'
-    )
+      currentRatios['billing_setting.billing_mode']?.[model] === 'tiered_expr'
+    ) {
       return 'tiered'
+    }
     if (
       currentRatios.ModelRatio[model] !== undefined ||
       currentRatios.CompletionRatio[model] !== undefined ||
@@ -413,7 +459,24 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
   }
 
   const performSync = useCallback(
-    async (currentRatios: ParsedRatios): Promise<boolean> => {
+    async (): Promise<boolean> => {
+      // 同步写入是全量覆盖整个倍率 map，必须以服务器最新配置为底组装，
+      // 否则页面快照陈旧会把其他模型刚保存的折扣/倍率冲掉（乒乓重置）
+      let currentRatios: ParsedRatios = parsedRatios
+      try {
+        const fresh = await queryClient.fetchQuery({
+          queryKey: ['system-options'],
+          queryFn: getSystemOptions,
+          staleTime: 0,
+        })
+        const rawMap = new Map(
+          (fresh?.data ?? []).map((o) => [o.key, o.value])
+        )
+        currentRatios = parseRatios((key) => rawMap.get(key))
+      } catch {
+        // 拉取失败时退回页面快照
+      }
+
       const finalRatios: Record<string, Record<string, number | string>> = {
         ModelRatio: { ...currentRatios.ModelRatio },
         CompletionRatio: { ...currentRatios.CompletionRatio },
@@ -456,7 +519,10 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
           (rt) => rt === 'billing_mode' || rt === 'billing_expr'
         )
         if (hasBillingExpr) {
-          delete finalRatios.ModelRatio[model]
+          // 注意：不动 ModelRatio——表达式计费下它是折扣位。
+          // 同选折扣时由后续循环写入新值；未同选时保留服务器现值，
+          // 避免"只同步表达式却把已配折扣冲成 1"。旧基础倍率残留由后端
+          // GetTieredModelRatioDiscount 的默认倍率表排除逻辑兜底（视为无折扣）。
           delete finalRatios.CompletionRatio[model]
           delete finalRatios.CacheRatio[model]
           delete finalRatios.CreateCacheRatio[model]
@@ -464,7 +530,6 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
           delete finalRatios.AudioRatio[model]
           delete finalRatios.AudioCompletionRatio[model]
           delete finalRatios.ModelPrice[model]
-          finalRatios.ModelRatio[model] = 1
         }
 
         Object.entries(ratios).forEach(([ratioType, value]) => {
@@ -487,7 +552,7 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
         })
       })
     },
-    [resolutions, syncMutate]
+    [resolutions, syncMutate, queryClient, parseRatios, parsedRatios]
   )
 
   const findSourceChannel = (
@@ -515,19 +580,40 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
       let newCat: 'price' | 'ratio' | 'tiered'
       if ('model_price' in ratios) {
         newCat = 'price'
+      } else if (
+        selectedTypes.includes('billing_mode') ||
+        selectedTypes.includes('billing_expr')
+      ) {
+        // 表达式计费优先判定：model_ratio 作为折扣伴随字段与 billing_expr 同选时
+        // 仍属 tiered，避免误报"表达式 → 倍率"的计费模式冲突
+        newCat = 'tiered'
       } else if (RATIO_SYNC_FIELDS.some((rt) => selectedTypes.includes(rt))) {
         newCat = 'ratio'
       } else {
         newCat = 'tiered'
       }
 
-      if (localCat && newCat !== 'tiered' && localCat !== newCat) {
-        const currentDesc =
-          localCat === 'price'
-            ? `${fixedPriceLabel}: ${currentRatios.ModelPrice[model]}`
-            : localCat === 'tiered'
-              ? 'Expression billing'
-              : `${modelRatioLabel}: ${currentRatios.ModelRatio[model] ?? '-'}\n${completionRatioLabel}: ${currentRatios.CompletionRatio[model] ?? '-'}`
+      // 本地已是表达式计费、本次仅选择折扣（model_ratio）时，只是设置折扣系数，
+      // 不改变计费模式，不属于"固定价格 vs 比例计费"冲突
+      const isDiscountOnlyOnTiered =
+        localCat === 'tiered' &&
+        newCat === 'ratio' &&
+        selectedTypes.every((rt) => rt === 'model_ratio')
+
+      if (
+        localCat &&
+        newCat !== 'tiered' &&
+        localCat !== newCat &&
+        !isDiscountOnlyOnTiered
+      ) {
+        let currentDesc: string
+        if (localCat === 'price') {
+          currentDesc = `${fixedPriceLabel}: ${currentRatios.ModelPrice[model]}`
+        } else if (localCat === 'tiered') {
+          currentDesc = 'Expression billing'
+        } else {
+          currentDesc = `${modelRatioLabel}: ${currentRatios.ModelRatio[model] ?? '-'}\n${completionRatioLabel}: ${currentRatios.CompletionRatio[model] ?? '-'}`
+        }
 
         // 此分支内 newCat 已排除 'tiered'（见上方守卫），仅可能是 price/ratio
         const newDesc =
@@ -556,13 +642,13 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
     }
 
     toast.info(t('Syncing prices, please wait...'))
-    performSync(currentRatios)
+    performSync()
   }
 
   const handleConfirmConflict = async () => {
     setConfirmLoading(true)
     try {
-      const success = await performSync(parsedRatios)
+      const success = await performSync()
       if (success) {
         setConflictDialogOpen(false)
       }
@@ -656,6 +742,45 @@ export function UpstreamRatioSync({ modelRatios }: UpstreamRatioSyncProps) {
               variant='ghost'
               size='icon-xs'
               onClick={() => setSkippedModels([])}
+              title={t('Close')}
+            >
+              <X />
+            </Button>
+          </AlertAction>
+        </Alert>
+      )}
+
+      {parseIssues.length > 0 && (
+        <Alert className='shrink-0'>
+          <AlertTitle>
+            {t('{{count}} models have price rows that need attention', {
+              count: parseIssues.length,
+            })}
+          </AlertTitle>
+          <AlertDescription>
+            {t(
+              'Price rows with billing conditions that cannot be tiered are charged at the highest tier price; rows with unrecognized descriptions are skipped, so affected models may be priced higher or incomplete'
+            )}
+          </AlertDescription>
+          <div className='col-span-full max-h-40 overflow-y-auto'>
+            <div className='flex flex-col gap-1.5 pt-1'>
+              {parseIssues.map((issue) => (
+                <div key={issue.model} className='flex min-w-0 flex-col gap-0.5'>
+                  <span className='bg-muted w-fit rounded px-1.5 py-0.5 font-mono text-xs'>
+                    {issue.model}
+                  </span>
+                  <span className='text-muted-foreground text-xs break-all'>
+                    {issue.reasons.map((r) => parseReasonText(r, t)).join('；')}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <AlertAction>
+            <Button
+              variant='ghost'
+              size='icon-xs'
+              onClick={() => setParseIssues([])}
               title={t('Close')}
             >
               <X />

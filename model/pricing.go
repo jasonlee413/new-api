@@ -36,6 +36,9 @@ type Pricing struct {
 	BillingMode            string                  `json:"billing_mode,omitempty"`
 	BillingExpr            string                  `json:"billing_expr,omitempty"`
 	PricingVersion         string                  `json:"pricing_version,omitempty"`
+	// Discount 用户配置的折扣系数（仅 tiered_expr 模型且 ≠1 时输出），
+	// 来自 ratio_setting.GetTieredModelRatioDiscount，用于模型广场展示折扣徽标
+	Discount *float64 `json:"discount,omitempty"`
 }
 
 type PricingVendor struct {
@@ -404,6 +407,9 @@ func updatePricing() {
 			if expr, ok := billing_setting.GetBillingExpr(model); ok && strings.TrimSpace(expr) != "" {
 				pricing.BillingMode = billingMode
 				pricing.BillingExpr = expr
+			}
+			if discount := ratio_setting.GetTieredModelRatioDiscount(model); discount != 1 {
+				pricing.Discount = &discount
 			}
 		}
 		pricingMap = append(pricingMap, pricing)

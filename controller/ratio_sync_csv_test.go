@@ -39,6 +39,50 @@ func TestParseDesc(t *testing.T) {
 	}
 }
 
+func TestInjectDiscountClearRows(t *testing.T) {
+	converted := map[string]any{
+		billing_setting.BillingModeField: map[string]string{
+			"m-clear":     "tiered_expr", // 本地 tiered_expr + 折扣 0.86，CSV 折扣为 1 → 应补覆盖项
+			"m-keep":      "tiered_expr", // CSV 折扣 0.8 已产出 → 不动
+			"m-none":      "tiered_expr", // 本地已是 1 → 无需补
+			"m-new":       "tiered_expr", // 本地无记录 → 不补（新增模型）
+			"m-ratio":     "tiered_expr", // 本地倍率计费 → model_ratio 是基础倍率，绝不能清成 1
+			"gpt-4o-mini": "tiered_expr", // 本地倍率等于内置默认表（0.075）→ 不算折扣，不清
+		},
+		"model_ratio": map[string]float64{"m-keep": 0.8},
+	}
+	localData := map[string]any{
+		"model_ratio": map[string]any{
+			"m-clear":     0.86,
+			"m-keep":      0.9,
+			"m-none":      1.0,
+			"m-ratio":     15,
+			"gpt-4o-mini": 0.075,
+		},
+		billing_setting.BillingModeField: map[string]any{
+			"m-clear":     "tiered_expr",
+			"m-keep":      "tiered_expr",
+			"m-none":      "tiered_expr",
+			"m-ratio":     "ratio",
+			"gpt-4o-mini": "tiered_expr",
+		},
+	}
+
+	injectDiscountClearRows(converted, localData)
+
+	ratios := converted["model_ratio"].(map[string]float64)
+	assert.Equal(t, 1.0, ratios["m-clear"])
+	assert.Equal(t, 0.8, ratios["m-keep"])
+	_, hasNone := ratios["m-none"]
+	assert.False(t, hasNone)
+	_, hasNew := ratios["m-new"]
+	assert.False(t, hasNew)
+	_, hasRatio := ratios["m-ratio"]
+	assert.False(t, hasRatio, "倍率计费模型的基础倍率不应被清成 1")
+	_, hasDefault := ratios["gpt-4o-mini"]
+	assert.False(t, hasDefault, "等于内置默认表的倍率不算折扣，不应被清")
+}
+
 func TestParseTimePeriodCondition(t *testing.T) {
 	t.Run("峰时多段", func(t *testing.T) {
 		tp, err := parseTimePeriodCondition("峰时 09:00-12:00、14:00-18:00（北京时间）")
@@ -80,6 +124,48 @@ func TestParseTimePeriodCondition(t *testing.T) {
 		}
 	})
 
+	t.Run("每周加每日复合条件", func(t *testing.T) {
+		tp, err := parseTimePeriodCondition("谷时 每周：周六 00:00-周一 00:00；每日：12:00-14:00、18:00-次日09:00（北京时间）")
+		require.NoError(t, err)
+		require.NotNil(t, tp)
+		// 标签必须干净，不得混入周级条件的残留文本
+		assert.Equal(t, "谷时", tp.Label)
+		assert.Equal(t, []minuteRange{{Start: 720, End: 840}, {Start: 1080, End: 540}}, tp.Ranges)
+		// 周六 00:00 = 6*1440，周一 00:00 = 1*1440（跨周边界）
+		assert.Equal(t, []minuteRange{{Start: 6 * 1440, End: 1 * 1440}}, tp.WeekRanges)
+	})
+
+	t.Run("全天时段视为无约束", func(t *testing.T) {
+		tp, err := parseTimePeriodCondition("标准 08:00-次日08:00（北京时间）")
+		assert.NoError(t, err)
+		assert.Nil(t, tp)
+	})
+
+	t.Run("指定时段日期范围", func(t *testing.T) {
+		tp, err := parseTimePeriodCondition("折扣 指定时段：2026-09-01 08:00 至 2026-12-01 08:00（北京时间）")
+		require.NoError(t, err)
+		require.NotNil(t, tp)
+		assert.Equal(t, "折扣", tp.Label)
+		assert.Empty(t, tp.Ranges)
+		require.NotNil(t, tp.DateRange)
+		assert.Equal(t, dateTimeRange{StartMD: 901, StartMins: 480, EndMD: 1201, EndMins: 480}, *tp.DateRange)
+	})
+
+	t.Run("指定时段起止顺序无效", func(t *testing.T) {
+		tp, err := parseTimePeriodCondition("折扣 指定时段：2026-12-01 08:00 至 2026-09-01 08:00（北京时间）")
+		assert.Error(t, err)
+		assert.Nil(t, tp)
+	})
+
+	t.Run("纯每周条件", func(t *testing.T) {
+		tp, err := parseTimePeriodCondition("谷时 每周：周五 18:00-周一 08:00（北京时间）")
+		require.NoError(t, err)
+		require.NotNil(t, tp)
+		assert.Equal(t, "谷时", tp.Label)
+		assert.Empty(t, tp.Ranges)
+		assert.Equal(t, []minuteRange{{Start: 5*1440 + 18*60, End: 1*1440 + 8*60}}, tp.WeekRanges)
+	})
+
 	t.Run("非法时段条件报错", func(t *testing.T) {
 		for _, cond := range []string{
 			"峰时 09:00-12:00（火星时间）",   // 未知时区
@@ -108,6 +194,21 @@ func TestTimePeriodExprCondition(t *testing.T) {
 	crossMidnight := &timePeriodCond{Label: "谷时", Timezone: "Asia/Shanghai",
 		Ranges: []minuteRange{{Start: 1080, End: 480}}}
 	assert.Equal(t, mins+" >= 1080 || "+mins+" < 480", crossMidnight.exprCondition())
+
+	weekly := &timePeriodCond{Label: "谷时", Timezone: "Asia/Shanghai",
+		Ranges:     []minuteRange{{Start: 720, End: 840}},
+		WeekRanges: []minuteRange{{Start: 6 * 1440, End: 1 * 1440}}}
+	wm := `weekday("Asia/Shanghai") * 1440 + ` + mins
+	assert.Equal(t,
+		mins+" >= 720 && "+mins+" < 840 || "+wm+" >= 8640 || "+wm+" < 1440",
+		weekly.exprCondition())
+
+	dateRanged := &timePeriodCond{Label: "折扣", Timezone: "Asia/Shanghai",
+		DateRange: &dateTimeRange{StartMD: 901, StartMins: 480, EndMD: 1201, EndMins: 480}}
+	md := `month("Asia/Shanghai") * 100 + day("Asia/Shanghai")`
+	assert.Equal(t,
+		"("+md+" > 901 || "+md+" == 901 && "+mins+" >= 480) && ("+md+" < 1201 || "+md+" == 1201 && "+mins+" < 480)",
+		dateRanged.exprCondition())
 }
 
 func TestParseTierUpperBound(t *testing.T) {
@@ -144,7 +245,7 @@ func TestParseCSVRows(t *testing.T) {
 		csvData := "\xEF\xBB\xBF\"模型ID\",\"计费单元\",\"说明\",\"标价(元)\",\"单位\"\n" +
 			"\"model-a\",\"unit-a\",\"输入 - 默认\",\"0.8\",\"百万 Token\"\n" +
 			"\"model-a\",\"unit-b\",\"文本输出 - 默认\",\"2\",\"百万 Token\"\n"
-		rows, err := parseCSVRows(strings.NewReader(csvData), ctx)
+		rows, _, err := parseCSVRows(strings.NewReader(csvData), ctx)
 		require.NoError(t, err)
 		require.Len(t, rows, 2)
 		assert.Equal(t, "model-a", rows[0].ModelID)
@@ -158,14 +259,14 @@ func TestParseCSVRows(t *testing.T) {
 			"\"model-a\",\"u\",\"输入 - 默认\",\"abc\",\"百万 Token\"\n" +
 			"\"model-b\",\"u\",\"输入 - 默认\",\"-1\",\"百万 Token\"\n" +
 			"\"model-c\",\"u\",\"输入 - 默认\",\"1.5\",\"百万 Token\"\n"
-		rows, err := parseCSVRows(strings.NewReader(csvData), ctx)
+		rows, _, err := parseCSVRows(strings.NewReader(csvData), ctx)
 		require.NoError(t, err)
 		require.Len(t, rows, 1)
 		assert.Equal(t, "model-c", rows[0].ModelID)
 	})
 
 	t.Run("表头列数不足报错", func(t *testing.T) {
-		_, err := parseCSVRows(strings.NewReader("\"a\",\"b\"\n"), ctx)
+		_, _, err := parseCSVRows(strings.NewReader("\"a\",\"b\"\n"), ctx)
 		require.Error(t, err)
 	})
 }
@@ -197,7 +298,7 @@ func TestParseXLSXRows(t *testing.T) {
 			{"model-a", "unit-a", "输入 - 默认", 0.8, "百万 Token"},
 			{"model-a", "unit-b", "文本输出 - 默认", 2, "百万 Token"},
 		})
-		rows, err := parseXLSXRows(bytes.NewReader(data), ctx)
+		rows, _, err := parseXLSXRows(bytes.NewReader(data), ctx)
 		require.NoError(t, err)
 		require.Len(t, rows, 2)
 		assert.Equal(t, "model-a", rows[0].ModelID)
@@ -213,7 +314,7 @@ func TestParseXLSXRows(t *testing.T) {
 			{"model-b", "u", "输入 - 默认", -1, "百万 Token"},
 			{"model-c", "u", "输入 - 默认", 1.5, "百万 Token"},
 		})
-		rows, err := parseXLSXRows(bytes.NewReader(data), ctx)
+		rows, _, err := parseXLSXRows(bytes.NewReader(data), ctx)
 		require.NoError(t, err)
 		require.Len(t, rows, 1)
 		assert.Equal(t, "model-c", rows[0].ModelID)
@@ -226,7 +327,7 @@ func TestParseXLSXRows(t *testing.T) {
 			{"deepseek-ai/DeepSeek-V3.2", "介绍...", "DeepSeek", "文本生成", "文本", "文本", "128K", "是", "否", "是", "DeepSeek-V3.2-input", "输入-默认", "2", "百万 Token"},
 			{"deepseek-ai/DeepSeek-V3.2", "介绍...", "DeepSeek", "文本生成", "文本", "文本", "128K", "是", "否", "是", "DeepSeek-V3.2-output", "文本输出-默认", "3", "百万 Token"},
 		})
-		rows, err := parseXLSXRows(bytes.NewReader(data), ctx)
+		rows, _, err := parseXLSXRows(bytes.NewReader(data), ctx)
 		require.NoError(t, err)
 		require.Len(t, rows, 2)
 		assert.Equal(t, "deepseek-ai/DeepSeek-V3.2", rows[0].ModelID)
@@ -237,12 +338,12 @@ func TestParseXLSXRows(t *testing.T) {
 
 	t.Run("表头缺少必需列报错", func(t *testing.T) {
 		data := buildXLSX(t, [][]any{{"a", "b"}})
-		_, err := parseXLSXRows(bytes.NewReader(data), ctx)
+		_, _, err := parseXLSXRows(bytes.NewReader(data), ctx)
 		require.Error(t, err)
 	})
 
 	t.Run("非 xlsx 内容报错", func(t *testing.T) {
-		_, err := parseXLSXRows(strings.NewReader("not an xlsx"), ctx)
+		_, _, err := parseXLSXRows(strings.NewReader("not an xlsx"), ctx)
 		require.Error(t, err)
 	})
 }
@@ -331,7 +432,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "缓存 - 默认", Price: 0.16, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("model-a", rows, result, ctx)
+		buildTokenPricing("model-a", rows, 1, result, ctx)
 		assert.Equal(t, "tiered_expr", result.billingModes["model-a"])
 		assert.Equal(t, "p*0.8 + c*2 + cr*0.16", result.billingExprs["model-a"])
 		assert.Empty(t, result.modelPrices)
@@ -343,7 +444,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "文本输出 - 默认", Price: 0, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("free-model", rows, result, ctx)
+		buildTokenPricing("free-model", rows, 1, result, ctx)
 		assert.Equal(t, "tiered_expr", result.billingModes["free-model"])
 		assert.Equal(t, "p*0 + c*0", result.billingExprs["free-model"])
 	})
@@ -356,7 +457,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "文本输出 - 输入长度(512K, 1M]", Price: 33.6, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("tiered-model", rows, result, ctx)
+		buildTokenPricing("tiered-model", rows, 1, result, ctx)
 		assert.Equal(t, "tiered_expr", result.billingModes["tiered-model"])
 		assert.Contains(t, result.billingExprs["tiered-model"], "len <= 512000")
 		assert.Contains(t, result.billingExprs["tiered-model"], `tier("standard"`)
@@ -370,7 +471,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "图像输出 - 默认", Price: 2.5, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("mm-model", rows, result, ctx)
+		buildTokenPricing("mm-model", rows, 1, result, ctx)
 		assert.Equal(t, "tiered_expr", result.billingModes["mm-model"])
 		assert.Contains(t, result.billingExprs["mm-model"], "img*0.3")
 		assert.Contains(t, result.billingExprs["mm-model"], "img_o*2.5")
@@ -385,7 +486,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "缓存写入 (1h) - 默认", Price: 4.2, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("cc1h-model", rows, result, ctx)
+		buildTokenPricing("cc1h-model", rows, 1, result, ctx)
 		assert.Equal(t, "tiered_expr", result.billingModes["cc1h-model"])
 		assert.Contains(t, result.billingExprs["cc1h-model"], "cc1h*4.2")
 		assert.Contains(t, result.billingExprs["cc1h-model"], "cc*2.625")
@@ -400,7 +501,7 @@ func TestBuildTokenPricing(t *testing.T) {
 		result := newCSVConvertResult()
 		// 缓存存储行单位为空，在 buildModelPricing 层已被过滤；
 		// 这里直接测试 buildTokenPricing 收到该行时也能正确跳过
-		buildTokenPricing("gemini-model", rows, result, ctx)
+		buildTokenPricing("gemini-model", rows, 1, result, ctx)
 		assert.Equal(t, "tiered_expr", result.billingModes["gemini-model"])
 		assert.Contains(t, result.billingExprs["gemini-model"], "p*0.15")
 		assert.Contains(t, result.billingExprs["gemini-model"], "c*0.6")
@@ -416,7 +517,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "文本输出-谷时 08:00-09:00、12:00-14:00、18:00-次日08:00（北京时间）", Price: 4.5, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("deepseek-v4-flash-0731", rows, result, ctx)
+		buildTokenPricing("deepseek-v4-flash-0731", rows, 1, result, ctx)
 		assert.Equal(t, "tiered_expr", result.billingModes["deepseek-v4-flash-0731"])
 		mins := `hour("Asia/Shanghai") * 60 + minute("Asia/Shanghai")`
 		expected := mins + " >= 540 && " + mins + " < 720 || " + mins + " >= 840 && " + mins + " < 1080" +
@@ -444,7 +545,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "文本输出-峰时 09:00-12:00（北京时间）", Price: 16, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("mixed-model", rows, result, ctx)
+		buildTokenPricing("mixed-model", rows, 1, result, ctx)
 		mins := `hour("Asia/Shanghai") * 60 + minute("Asia/Shanghai")`
 		expected := mins + " >= 540 && " + mins + " < 720" +
 			` ? tier("峰时", p*4 + c*16) : (p*2 + c*8)`
@@ -458,7 +559,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "输入-谷时 18:00-次日09:00（北京时间）", Price: 1.5, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("tiered-period-model", rows, result, ctx)
+		buildTokenPricing("tiered-period-model", rows, 1, result, ctx)
 		mins := `hour("Asia/Shanghai") * 60 + minute("Asia/Shanghai")`
 		expected := mins + " >= 540 && " + mins + " < 720" +
 			` ? (len <= 512000 ? tier("峰时 standard", p*3) : (tier("峰时 long_context", p*6)))` +
@@ -475,7 +576,7 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "文本输出-谷时 18:00-次日09:00（北京时间）", Price: 4.5, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("inconsistent-model", rows, result, ctx)
+		buildTokenPricing("inconsistent-model", rows, 1, result, ctx)
 		mins := `hour("Asia/Shanghai") * 60 + minute("Asia/Shanghai")`
 		expected := mins + " >= 540 && " + mins + " < 720" +
 			` ? tier("峰时", p*3 + c*9) : (tier("谷时", p*1.5 + c*4.5))`
@@ -489,8 +590,58 @@ func TestBuildTokenPricing(t *testing.T) {
 			{Desc: "文本输出 - 默认", Price: 8, Unit: "百万 Token"},
 		}
 		result := newCSVConvertResult()
-		buildTokenPricing("bad-period-model", rows, result, ctx)
+		buildTokenPricing("bad-period-model", rows, 1, result, ctx)
 		assert.Equal(t, "p*2 + c*8", result.billingExprs["bad-period-model"])
+	})
+
+	t.Run("组合条件折叠进长度档位取最高价", func(t *testing.T) {
+		// service_tier=Priority 等组合条件无法按段计费：
+		// 折叠进可解析的输入长度档位，同档位取最高价，与行序无关
+		rows := []csvPriceRow{
+			{Desc: "输入 - 输入长度(0, 272K] 且 service_tier=Priority", Price: 4, Unit: "百万 Token"},
+			{Desc: "输入 - 输入长度(0, 272K]", Price: 2, Unit: "百万 Token"},
+			{Desc: "输入 - 输入长度(272K, UNLIMIT]", Price: 6, Unit: "百万 Token"},
+			{Desc: "输入 - 输入长度(272K, UNLIMIT] 且 service_tier=Priority", Price: 8, Unit: "百万 Token"},
+			{Desc: "文本输出 - 输入长度(0, 272K]", Price: 16, Unit: "百万 Token"},
+			{Desc: "文本输出 - 输入长度(272K, UNLIMIT]", Price: 48, Unit: "百万 Token"},
+		}
+		result := newCSVConvertResult()
+		buildTokenPricing("combo-tier-model", rows, 1, result, ctx)
+		assert.Equal(t, "tiered_expr", result.billingModes["combo-tier-model"])
+		expected := `len <= 272000 ? tier("standard", p*4 + c*16) : (tier("long_context", p*8 + c*48))`
+		assert.Equal(t, expected, result.billingExprs["combo-tier-model"])
+		require.Len(t, result.skipReasons["combo-tier-model"], 2)
+		assert.Contains(t, result.skipReasons["combo-tier-model"][0], "highest_tier_fallback")
+	})
+
+	t.Run("组合条件无档位折叠进默认档取最高价", func(t *testing.T) {
+		// 视频类 service_tier/generate_audio 组合条件：无输入长度档位，
+		// 全部折叠进默认档取最高价（统一按最高档计费）
+		rows := []csvPriceRow{
+			{Desc: "输入 - service_tier=flex 且 generate_audio=false", Price: 0.5, Unit: "百万 Token"},
+			{Desc: "输入 - service_tier=default 且 generate_audio=false", Price: 1, Unit: "百万 Token"},
+			{Desc: "视频输出 - service_tier=default 且 generate_audio=true", Price: 3, Unit: "百万 Token"},
+			{Desc: "视频输出 - service_tier=default 且 generate_audio=false", Price: 2, Unit: "百万 Token"},
+		}
+		result := newCSVConvertResult()
+		buildTokenPricing("video-combo-model", rows, 1, result, ctx)
+		assert.Equal(t, "tiered_expr", result.billingModes["video-combo-model"])
+		assert.Equal(t, "p*1 + c*3", result.billingExprs["video-combo-model"])
+	})
+
+	t.Run("组合条件为唯一档位时按最高价出单档", func(t *testing.T) {
+		// 输入长度 × 输出长度二维定价（glm-4.6 等）：折叠后每个输入长度档位
+		// 取各输出长度变体的最高价
+		rows := []csvPriceRow{
+			{Desc: "输入 - 输入长度(0, 32K] 且 输出长度(0, 0.2K]", Price: 2, Unit: "百万 Token"},
+			{Desc: "输入 - 输入长度(0, 32K] 且 输出长度(0.2K, 20M]", Price: 3, Unit: "百万 Token"},
+			{Desc: "文本输出 - 输入长度(0, 32K] 且 输出长度(0, 0.2K]", Price: 8, Unit: "百万 Token"},
+			{Desc: "文本输出 - 输入长度(0, 32K] 且 输出长度(0.2K, 20M]", Price: 10, Unit: "百万 Token"},
+		}
+		result := newCSVConvertResult()
+		buildTokenPricing("matrix-model", rows, 1, result, ctx)
+		assert.Equal(t, "tiered_expr", result.billingModes["matrix-model"])
+		assert.Equal(t, `tier("tier_1", p*3 + c*10)`, result.billingExprs["matrix-model"])
 	})
 }
 
@@ -501,7 +652,7 @@ func TestBuildFixedPricing(t *testing.T) {
 			{Desc: "视频时长 - 1080p 且 duration=6", Price: 0.5833, Unit: "秒"},
 		}
 		result := newCSVConvertResult()
-		buildFixedPricing("vidu-model", rows, result)
+		buildFixedPricing("vidu-model", rows, 1, result)
 		assert.InDelta(t, 0.5833, result.modelPrices["vidu-model"], 1e-9)
 	})
 
@@ -510,7 +661,7 @@ func TestBuildFixedPricing(t *testing.T) {
 			{Desc: "请求次数 - 默认", Price: 0.712, Unit: "次"},
 		}
 		result := newCSVConvertResult()
-		buildFixedPricing("mj-model", rows, result)
+		buildFixedPricing("mj-model", rows, 1, result)
 		assert.InDelta(t, 0.712, result.modelPrices["mj-model"], 1e-9)
 	})
 }
@@ -529,11 +680,12 @@ func TestConvertCSVToRatioData(t *testing.T) {
 		"fixed-model": true,
 	}
 
-	converted, displayPrices, skipped, err := convertCSVToRatioData(strings.NewReader(csvData), localModels, ctx)
+	converted, displayPrices, skipped, parseIssues, err := convertCSVToRatioData(strings.NewReader(csvData), localModels, ctx)
 	require.NoError(t, err)
 
 	// remote-model 不在本地，应被跳过
 	assert.Equal(t, []string{"remote-model"}, skipped)
+	assert.Empty(t, parseIssues)
 
 	// local-model 出表达式（不再出倍率）
 	billingModes, ok := converted[billing_setting.BillingModeField].(map[string]string)
@@ -579,8 +731,52 @@ func TestConvertCSVToRatioData(t *testing.T) {
 
 func TestConvertCSVToRatioDataEmpty(t *testing.T) {
 	ctx := context.Background()
-	_, _, _, err := convertCSVToRatioData(strings.NewReader("\"a\",\"b\",\"c\",\"d\",\"e\"\n"), map[string]bool{}, ctx)
+	_, _, _, _, err := convertCSVToRatioData(strings.NewReader("\"a\",\"b\",\"c\",\"d\",\"e\"\n"), map[string]bool{}, ctx)
 	require.Error(t, err)
+}
+
+func TestConvertRowsToRatioDataParseIssues(t *testing.T) {
+	ctx := context.Background()
+	rows := []csvPriceRow{
+		// 全部行带组合请求条件 → 折叠按最高档计费，有产出但上报提示
+		{ModelID: "combined-model", Desc: "输入 - 输入长度(0, 32K] 且 输出长度(0, 0.2K]", Price: 2, Unit: "百万 Token"},
+		{ModelID: "combined-model", Desc: "文本输出 - 输入长度(0, 32K] 且 输出长度(0, 0.2K]", Price: 8, Unit: "百万 Token"},
+		// 部分行折叠 → 有产出但仍应提示
+		{ModelID: "partial-model", Desc: "输入 - 默认", Price: 1, Unit: "百万 Token"},
+		{ModelID: "partial-model", Desc: "缓存 - 1080p 且 duration=6", Price: 0.1, Unit: "百万 Token"},
+		// 正常模型
+		{ModelID: "ok-model", Desc: "输入 - 默认", Price: 1, Unit: "百万 Token"},
+	}
+
+	converted, _, _, parseIssues, err := convertRowsToRatioData(rows, map[string]bool{
+		"combined-model": true, "partial-model": true, "ok-model": true,
+	}, ctx)
+	require.NoError(t, err)
+
+	issuesByModel := make(map[string]modelParseIssue)
+	for _, issue := range parseIssues {
+		issuesByModel[issue.Model] = issue
+	}
+	require.Len(t, parseIssues, 2)
+
+	combined, ok := issuesByModel["combined-model"]
+	require.True(t, ok)
+	assert.NotContains(t, combined.Reasons, "no_pricing_produced")
+	assert.Contains(t, combined.Reasons[0], "highest_tier_fallback")
+	combinedExpr, hasCombined := converted[billing_setting.BillingExprField].(map[string]string)["combined-model"]
+	require.True(t, hasCombined, "组合条件行折叠后应产出计费表达式")
+	assert.Contains(t, combinedExpr, "p*2")
+	assert.Contains(t, combinedExpr, "c*8")
+
+	partial, ok := issuesByModel["partial-model"]
+	require.True(t, ok)
+	assert.NotContains(t, partial.Reasons, "no_pricing_produced")
+	assert.Contains(t, partial.Reasons[0], "highest_tier_fallback")
+	partialExpr := converted[billing_setting.BillingExprField].(map[string]string)["partial-model"]
+	assert.Equal(t, "p*1 + cr*0.1", partialExpr, "组合条件行折叠进默认档")
+
+	_, hasOk := issuesByModel["ok-model"]
+	assert.False(t, hasOk)
 }
 
 func TestBuildExprDisplayLines(t *testing.T) {
@@ -625,4 +821,153 @@ func TestBuildExprDisplayLines(t *testing.T) {
 		{Label: "Output price", Value: "8 元/M"},
 		{Label: "Image input price", Value: "1.5 元/M"},
 	}, buildExprDisplayLines(multimodal))
+}
+
+func TestDiscountDisplay(t *testing.T) {
+	assert.Equal(t, "6 折", discountDisplay(0.6))
+	assert.Equal(t, "6.5 折", discountDisplay(0.65))
+	assert.Equal(t, "9.9 折", discountDisplay(0.99))
+}
+
+func TestParseCSVRowsDiscountColumn(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("无折扣列默认1", func(t *testing.T) {
+		csvData := "\"模型ID\",\"计费单元\",\"说明\",\"标价(元)\",\"单位\"\n" +
+			"\"model-a\",\"u\",\"输入 - 默认\",\"0.8\",\"百万 Token\"\n"
+		rows, discountCol, err := parseCSVRows(strings.NewReader(csvData), ctx)
+		require.NoError(t, err)
+		require.Len(t, rows, 1)
+		assert.Equal(t, 1.0, rows[0].Discount)
+		assert.False(t, discountCol, "无折扣列时不应触发折扣覆盖语义")
+	})
+
+	t.Run("解析折扣系数", func(t *testing.T) {
+		csvData := "\"模型ID\",\"计费单元\",\"说明\",\"标价(元)\",\"单位\",\"折扣\"\n" +
+			"\"model-a\",\"u\",\"输入 - 默认\",\"0.8\",\"百万 Token\",\"0.6\"\n" +
+			"\"model-a\",\"u\",\"文本输出 - 默认\",\"2\",\"百万 Token\",\"\"\n" +
+			"\"model-b\",\"u\",\"输入 - 默认\",\"1\",\"百万 Token\",\"1\"\n"
+		rows, discountCol, err := parseCSVRows(strings.NewReader(csvData), ctx)
+		require.NoError(t, err)
+		require.Len(t, rows, 3)
+		assert.True(t, discountCol)
+		assert.InDelta(t, 0.6, rows[0].Discount, 1e-9)
+		assert.Equal(t, 1.0, rows[1].Discount, "空单元格按 1 处理")
+		assert.Equal(t, 1.0, rows[2].Discount)
+	})
+
+	t.Run("非法折扣按1且保留行", func(t *testing.T) {
+		csvData := "\"模型ID\",\"计费单元\",\"说明\",\"标价(元)\",\"单位\",\"折扣\"\n" +
+			"\"model-a\",\"u\",\"输入 - 默认\",\"0.8\",\"百万 Token\",\"abc\"\n" +
+			"\"model-b\",\"u\",\"输入 - 默认\",\"1\",\"百万 Token\",\"0\"\n" +
+			"\"model-c\",\"u\",\"输入 - 默认\",\"1\",\"百万 Token\",\"-0.5\"\n" +
+			"\"model-d\",\"u\",\"输入 - 默认\",\"1\",\"百万 Token\",\"1.2\"\n"
+		rows, _, err := parseCSVRows(strings.NewReader(csvData), ctx)
+		require.NoError(t, err)
+		require.Len(t, rows, 4, "非法折扣不应丢弃整行")
+		for _, r := range rows {
+			assert.Equal(t, 1.0, r.Discount, "model=%s", r.ModelID)
+		}
+	})
+}
+
+func TestResolveModelDiscount(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("全为1返回1", func(t *testing.T) {
+		rows := []csvPriceRow{{Discount: 1}, {Discount: 1}}
+		assert.Equal(t, 1.0, resolveModelDiscount("m", rows, ctx))
+	})
+
+	t.Run("取首个非1值", func(t *testing.T) {
+		// 只在首行填折扣，其余行留空（解析为 1）
+		rows := []csvPriceRow{{Discount: 0.6}, {Discount: 1}, {Discount: 1}}
+		assert.InDelta(t, 0.6, resolveModelDiscount("m", rows, ctx), 1e-9)
+	})
+
+	t.Run("不一致取首个非1值", func(t *testing.T) {
+		rows := []csvPriceRow{{Discount: 0.6}, {Discount: 0.6}, {Discount: 0.8}}
+		assert.InDelta(t, 0.6, resolveModelDiscount("m", rows, ctx), 1e-9)
+	})
+}
+
+func TestBuildTokenPricingWithDiscount(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("折扣写入modelRatio折扣位", func(t *testing.T) {
+		rows := []csvPriceRow{
+			{Desc: "输入 - 默认", Price: 8, Unit: "百万 Token"},
+			{Desc: "文本输出 - 默认", Price: 28, Unit: "百万 Token"},
+		}
+		result := newCSVConvertResult()
+		buildTokenPricing("glm-5.2", rows, 0.6, result, ctx)
+		// 表达式系数保持标价
+		assert.Equal(t, "p*8 + c*28", result.billingExprs["glm-5.2"])
+		assert.InDelta(t, 0.6, result.modelRatios["glm-5.2"], 1e-9)
+		assert.Equal(t, "6 折", result.displayPrices["glm-5.2"]["model_ratio"])
+	})
+
+	t.Run("折扣为1不写modelRatio", func(t *testing.T) {
+		rows := []csvPriceRow{
+			{Desc: "输入 - 默认", Price: 8, Unit: "百万 Token"},
+		}
+		result := newCSVConvertResult()
+		buildTokenPricing("model-a", rows, 1, result, ctx)
+		_, has := result.modelRatios["model-a"]
+		assert.False(t, has)
+		_, hasDisplay := result.displayPrices["model-a"]["model_ratio"]
+		assert.False(t, hasDisplay)
+	})
+}
+
+func TestBuildFixedPricingWithDiscount(t *testing.T) {
+	// 固定价模型折扣折进 model_price
+	rows := []csvPriceRow{
+		{Desc: "请求次数 - 默认", Price: 0.8, Unit: "次"},
+	}
+	result := newCSVConvertResult()
+	buildFixedPricing("mj-model", rows, 0.5, result)
+	assert.InDelta(t, 0.4, result.modelPrices["mj-model"], 1e-9)
+	assert.Equal(t, "0.4 元/次", result.displayPrices["mj-model"]["model_price"])
+	// 固定价模型不走 modelRatio 折扣位
+	_, has := result.modelRatios["mj-model"]
+	assert.False(t, has)
+}
+
+func TestConvertCSVToRatioDataWithDiscount(t *testing.T) {
+	ctx := context.Background()
+	csvData := "\xEF\xBB\xBF\"模型ID\",\"计费单元\",\"说明\",\"标价(元)\",\"单位\",\"折扣\"\n" +
+		"\"local-model\",\"u1\",\"输入 - 默认\",\"0.8\",\"百万 Token\",\"0.6\"\n" +
+		"\"local-model\",\"u2\",\"文本输出 - 默认\",\"2\",\"百万 Token\",\"0.6\"\n" +
+		"\"plain-model\",\"u3\",\"输入 - 默认\",\"1\",\"百万 Token\",\"\"\n" +
+		"\"fixed-model\",\"u4\",\"请求次数 - 默认\",\"0.712\",\"次\",\"0.5\"\n"
+
+	localModels := map[string]bool{
+		"local-model": true,
+		"plain-model": true,
+		"fixed-model": true,
+	}
+
+	converted, displayPrices, _, _, err := convertCSVToRatioData(strings.NewReader(csvData), localModels, ctx)
+	require.NoError(t, err)
+
+	// 折扣模型：表达式保持标价，model_ratio 输出折扣
+	exprs, ok := converted[billing_setting.BillingExprField].(map[string]string)
+	require.True(t, ok)
+	assert.Contains(t, exprs["local-model"], "p*0.8")
+	modelRatios, ok := converted["model_ratio"].(map[string]float64)
+	require.True(t, ok)
+	assert.InDelta(t, 0.6, modelRatios["local-model"], 1e-9)
+	_, hasPlain := modelRatios["plain-model"]
+	assert.False(t, hasPlain, "折扣为 1 的模型不应输出 model_ratio")
+	_, hasFixed := modelRatios["fixed-model"]
+	assert.False(t, hasFixed, "固定价模型折扣折进价格，不输出 model_ratio")
+
+	// 固定价模型折后价
+	prices, ok := converted["model_price"].(map[string]float64)
+	require.True(t, ok)
+	assert.InDelta(t, 0.356, prices["fixed-model"], 1e-9)
+
+	// 可读折扣行
+	assert.Equal(t, "6 折", displayPrices["local-model"]["model_ratio"])
 }

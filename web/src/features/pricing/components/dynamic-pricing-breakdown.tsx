@@ -113,7 +113,8 @@ export function formatConditionSummary(
 
 export function formatTimeSummary(
   tier: ParsedTier,
-  t: (key: string) => string
+  t: (key: string) => string,
+  showTimezone = false
 ): string {
   const periods = tier.timePeriods
   if (periods && periods.length > 0) {
@@ -123,9 +124,12 @@ export function formatTimeSummary(
           `${p.start}~${p.end}${p.crossMidnight ? `(${t('next day')})` : ''}`
       )
       .join('、')
-    return `${text} (${periods[0].timezone})`
+    return showTimezone ? `${text} (${periods[0].timezone})` : text
   }
-  if (tier.timeFallback) return t('Other hours')
+  if (tier.timeFallback) {
+    const label = t('Other hours')
+    return showTimezone && tier.timeZone ? `${label} (${tier.timeZone})` : label
+  }
   return ''
 }
 

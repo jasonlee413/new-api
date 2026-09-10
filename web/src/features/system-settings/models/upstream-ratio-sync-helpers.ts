@@ -110,6 +110,8 @@ export function getPreferredSyncField(
   const exprValue = ratioTypes.billing_expr?.upstreams?.[sourceName]
   if (
     ratioType !== 'billing_expr' &&
+    // model_ratio 在表达式计费下是折扣位，可与 billing_expr 同选，不做重定向
+    ratioType !== 'model_ratio' &&
     exprValue !== null &&
     exprValue !== undefined &&
     exprValue !== 'same'

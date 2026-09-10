@@ -241,6 +241,8 @@ export type ParsedTier = {
   timePeriods?: ParsedTimePeriod[]
   /** True when this tier is the else-branch of a time-sliced expression */
   timeFallback?: boolean
+  /** Timezone of the time condition that gates this tier (or its sibling time-sliced branch for the fallback else-branch) */
+  timeZone?: string
   [field: string]: unknown
 }
 
@@ -434,8 +436,10 @@ function tryParseTimeSlicedTiers(body: string): ParsedTier[] | null {
     elseTiers = plain ? [plain] : []
   }
   if (elseTiers.length === 0) return null
+  const tz = ranges[0]?.timezone
   for (const tier of elseTiers) {
     tier.timeFallback = true
+    if (tz) tier.timeZone = tz
   }
   return [...thenTiers, ...elseTiers]
 }

@@ -39,6 +39,7 @@ import { isTokenBasedModel } from '../lib/model-helpers'
 import { formatPrice, formatRequestPrice } from '../lib/price'
 import type { PricingModel, TokenUnit } from '../types'
 import { ModelBillingModeBadge } from './model-billing-mode-badge'
+import { ModelDiscountBadge } from './model-discount-badge'
 import { ModelPerfBadge, type ModelPerfBadgeData } from './model-perf-badge'
 
 export interface ModelCardProps {
@@ -162,17 +163,8 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
                   key={`card-tier-${tierIndex}`}
                   className='flex flex-wrap items-baseline gap-x-2 gap-y-0.5'
                 >
-                  <span className='inline-flex items-baseline gap-1'>
-                    <span className='rounded bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-500/20 dark:text-blue-300'>
-                      {tier.label || t('Default')}
-                    </span>
-                    {(condSummary || timeSummary) && (
-                      <span className='text-muted-foreground/70 text-[11px]'>
-                        {[condSummary, timeSummary]
-                          .filter(Boolean)
-                          .join(' · ')}
-                      </span>
-                    )}
+                  <span className='rounded bg-blue-100 px-1.5 py-0.5 text-[11px] font-medium text-blue-700 dark:bg-blue-500/20 dark:text-blue-300'>
+                    {tier.label || t('Default')}
                   </span>
                   {tierEntries.map((entry) => (
                     <span
@@ -185,6 +177,11 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
                       </span>
                     </span>
                   ))}
+                  {(condSummary || timeSummary) && (
+                    <span className='text-muted-foreground/70 text-[11px]'>
+                      ({[condSummary, timeSummary].filter(Boolean).join(' · ')})
+                    </span>
+                  )}
                 </div>
               )
             })}
@@ -300,9 +297,12 @@ export const ModelCard = memo(function ModelCard(props: ModelCardProps) {
             )}
           </div>
           <div className='min-w-0'>
-            <h3 className='text-foreground truncate font-mono text-[15px] leading-tight font-bold'>
-              {props.model.model_name}
-            </h3>
+            <div className='flex min-w-0 items-center gap-1.5'>
+              <h3 className='text-foreground truncate font-mono text-[15px] leading-tight font-bold'>
+                {props.model.model_name}
+              </h3>
+              <ModelDiscountBadge discount={props.model.discount} />
+            </div>
             <div className='mt-0.5 flex flex-wrap items-baseline gap-x-2 gap-y-0.5 text-sm sm:mt-1 sm:gap-x-3'>
               {priceSummary}
             </div>

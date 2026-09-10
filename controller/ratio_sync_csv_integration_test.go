@@ -24,7 +24,7 @@ func TestConvertRealUCloudCSV(t *testing.T) {
 	ctx := context.Background()
 
 	// 先解析出行收集全部模型名，作为 localModels（跳过过滤）
-	rows, err := parseCSVRows(mustOpen(t, csvPath), ctx)
+	rows, _, err := parseCSVRows(mustOpen(t, csvPath), ctx)
 	require.NoError(t, err)
 	require.Equal(t, 1443, len(rows), "应解析出全部 1443 行")
 
@@ -36,7 +36,7 @@ func TestConvertRealUCloudCSV(t *testing.T) {
 	}
 	require.Equal(t, 225, len(localModels), "应有 225 个唯一模型")
 
-	converted, displayPrices, skipped, err := convertCSVToRatioData(mustOpen(t, csvPath), localModels, ctx)
+	converted, displayPrices, skipped, _, err := convertCSVToRatioData(mustOpen(t, csvPath), localModels, ctx)
 	require.NoError(t, err)
 	assertEmptySlice(t, skipped)
 

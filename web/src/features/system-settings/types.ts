@@ -444,6 +444,11 @@ export type DisplayPriceLine = {
   value: string
 }
 
+export type ModelParseIssue = {
+  model: string
+  reasons: string[]
+}
+
 export type UpstreamRatiosResponse = {
   success: boolean
   message: string
@@ -455,5 +460,6 @@ export type UpstreamRatiosResponse = {
       string,
       Record<string, string | DisplayPriceLine[]>
     >
+    parse_issues?: ModelParseIssue[]
   }
 }
